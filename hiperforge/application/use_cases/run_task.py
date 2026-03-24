@@ -92,7 +92,7 @@ from hiperforge.application.services.planner import PlannerService
 from hiperforge.core.config import Settings
 from hiperforge.core.events import AgentEvent, get_event_bus
 from hiperforge.core.logging import get_logger
-from hiperforge.domain.entities.task import Task
+from hiperforge.domain.entities.task import Task, TaskStatus
 from hiperforge.domain.entities.workspace import Workspace
 from hiperforge.domain.exceptions import EntityNotFound, PlanError
 from hiperforge.infrastructure.session.in_memory_session import InMemorySession
@@ -176,17 +176,28 @@ class RunTaskUseCase:
         # ── Paso 1: resolver el workspace activo ──────────────────────
         workspace_id = self._resolve_workspace_id(input_data)
 
+        # ── Modo B: ejecutar una task ya existente (planificada) ──────
+        if input_data.task_id is not None:
+            return self._execute_existing_task(
+                task_id=input_data.task_id,
+                workspace_id=workspace_id,
+                auto_confirm=input_data.auto_confirm,
+                on_confirm_plan=on_confirm_plan,
+                on_subtask_limit_reached=on_subtask_limit_reached,
+                on_subtask_started=on_subtask_started,
+                start_time=start_time,
+            )
+
+        # ── Modo A: crear y ejecutar una task nueva ───────────────────
         logger.info(
-            "iniciando RunTaskUseCase",
+            "iniciando RunTaskUseCase (nueva task)",
             workspace_id=workspace_id,
             project_id=input_data.project_id,
-            prompt_preview=input_data.prompt[:80],
+            prompt_preview=(input_data.prompt or "")[:80],
             auto_confirm=input_data.auto_confirm,
         )
 
         # ── Paso 2: resolver project_id válido ────────────────────────
-        # Si se especificó un project_id, verificamos que existe.
-        # Si no existe, continuamos con task suelta (sin proyecto).
         effective_project_id = self._resolve_project_id(
             project_id=input_data.project_id,
             workspace_id=workspace_id,
@@ -194,7 +205,7 @@ class RunTaskUseCase:
 
         # ── Paso 3: crear la entidad Task ─────────────────────────────
         task = Task.create(
-            prompt=input_data.prompt,
+            prompt=input_data.prompt or "",
             project_id=effective_project_id,
         )
 
@@ -280,41 +291,57 @@ class RunTaskUseCase:
         """
         Ejecuta las fases de planificación y ejecución en secuencia.
 
-        Si la planificación falla, la task queda en estado FAILED
-        con un mensaje descriptivo del error.
+        Soporta dos puntos de entrada:
+          - Task en PENDING     → planifica primero, luego ejecuta.
+          - Task en IN_PROGRESS → el plan ya existe, ejecuta directamente.
+            (Ocurre cuando se usó plan_task antes de run_task.)
+
+        Si la planificación falla, la task queda en estado FAILED.
 
         Returns:
             Task en estado terminal (COMPLETED, FAILED o CANCELLED).
         """
-        # ── Fase de planificación ─────────────────────────────────────
-        task = task.start_planning()
-        get_event_bus().emit(AgentEvent.task_planning(task_id=task.id))
-        session.update_task(task)
-
-        try:
-            subtasks = self._planner.generate_plan(task)
-        except PlanError as exc:
-            logger.error(
-                "planificación falló",
+        # ── Caso 1: task ya planificada (IN_PROGRESS con subtasks) ────
+        # Ocurre cuando el usuario usó `hiperforge task plan` antes de run.
+        # Saltamos la planificación y vamos directo a la ejecución.
+        if task.status == TaskStatus.IN_PROGRESS and task.subtasks:
+            logger.info(
+                "task ya planificada — saltando fase de planificación",
                 task_id=task.id,
-                error=str(exc),
+                subtask_count=len(task.subtasks),
             )
-            # Transicionamos directamente a FAILED desde PLANNING
-            # Para eso necesitamos pasar por IN_PROGRESS primero
-            # (las transiciones válidas son PLANNING → IN_PROGRESS → FAILED)
-            task = task.start_execution([])
-            task = task.fail()
             session.update_task(task)
-            return task
 
-        # Registrar el plan generado en la task
-        task = task.start_execution(subtasks)
-        session.update_task(task)
+        else:
+            # ── Caso 2: task en PENDING — planificar primero ──────────
+            task = task.start_planning()
+            get_event_bus().emit(AgentEvent.task_planning(task_id=task.id))
+            session.update_task(task)
+
+            try:
+                subtasks = self._planner.generate_plan(task)
+            except PlanError as exc:
+                logger.error(
+                    "planificación falló",
+                    task_id=task.id,
+                    error=str(exc),
+                )
+                # Transicionamos directamente a FAILED desde PLANNING.
+                # Las transiciones válidas son PLANNING → IN_PROGRESS → FAILED,
+                # así que necesitamos pasar por IN_PROGRESS con lista vacía.
+                task = task.start_execution([])
+                task = task.fail()
+                session.update_task(task)
+                return task
+
+            # Registrar el plan generado en la task
+            task = task.start_execution(subtasks)
+            session.update_task(task)
 
         logger.info(
-            "plan generado",
+            "plan listo para ejecutar",
             task_id=task.id,
-            subtask_count=len(subtasks),
+            subtask_count=len(task.subtasks),
         )
 
         # ── Fase de ejecución ─────────────────────────────────────────
@@ -478,3 +505,153 @@ class RunTaskUseCase:
             duration_seconds=round(duration_seconds, 3),
             error_message=error_message,
         )
+
+    def _execute_existing_task(
+        self,
+        task_id: str,
+        workspace_id: str,
+        auto_confirm: bool,
+        on_confirm_plan: Callable[[Task], bool] | None,
+        on_subtask_limit_reached: Callable[[object, int], LimitDecision] | None,
+        on_subtask_started: Callable[[object, int, int], None] | None,
+        start_time: float,
+    ) -> RunTaskOutput:
+        """
+        Ejecuta una task ya existente en disco (ya planificada).
+
+        Carga la task desde disco, verifica que está en IN_PROGRESS
+        con subtasks en PENDING, y la pasa directamente al executor
+        saltando la fase de planificación.
+
+        Parámetros:
+            task_id:      ID de la task a ejecutar.
+            workspace_id: Workspace donde reside la task.
+        """
+        logger.info(
+            "iniciando RunTaskUseCase (task existente)",
+            task_id=task_id,
+            workspace_id=workspace_id,
+        )
+
+        # Buscar la task en todos los proyectos del workspace
+        task = self._load_task_from_workspace(
+            task_id=task_id,
+            workspace_id=workspace_id,
+        )
+
+        if task is None:
+            # Task no encontrada — construimos un output de fallo
+            return RunTaskOutput(
+                task_id=task_id,
+                status="failed",
+                summary="",
+                subtasks_completed=0,
+                subtasks_total=0,
+                total_tokens=0,
+                estimated_cost_usd=0.0,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+                error_message=(
+                    f"Task '{task_id}' no encontrada en el workspace '{workspace_id}'. "
+                    f"Verifica el ID con: hiperforge task list"
+                ),
+            )
+
+        # Verificar que la task puede ejecutarse
+        if task.status == TaskStatus.COMPLETED:
+            return RunTaskOutput(
+                task_id=task.id,
+                status="completed",
+                summary=task.summary or "Task ya completada anteriormente.",
+                subtasks_completed=len(task.completed_subtasks),
+                subtasks_total=len(task.subtasks),
+                total_tokens=task.token_usage.total_tokens,
+                estimated_cost_usd=task.token_usage.estimated_cost_usd,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+                error_message=None,
+            )
+
+        if task.is_terminal:
+            return RunTaskOutput(
+                task_id=task.id,
+                status=task.status.value,
+                summary="",
+                subtasks_completed=len(task.completed_subtasks),
+                subtasks_total=len(task.subtasks),
+                total_tokens=task.token_usage.total_tokens,
+                estimated_cost_usd=task.token_usage.estimated_cost_usd,
+                duration_seconds=round(time.monotonic() - start_time, 3),
+                error_message=(
+                    f"La task está en estado '{task.status.value}' y no puede ejecutarse. "
+                    f"Crea una nueva task con el mismo prompt si quieres reintentar."
+                ),
+            )
+
+        # Ejecutar con el mismo flujo que una task nueva
+        session = InMemorySession(task=task, workspace_id=workspace_id)
+        get_event_bus().emit(
+            AgentEvent.task_started(
+                task_id=task.id,
+                prompt=task.prompt,
+                project_id=task.project_id,
+            )
+        )
+
+        with SessionFlusher(
+            session=session,
+            storage=self._store._storage,
+            locator=self._locator,
+        ):
+            try:
+                task = self._run_planning_and_execution(
+                    task=task,
+                    session=session,
+                    auto_confirm=auto_confirm,
+                    on_confirm_plan=on_confirm_plan,
+                    on_subtask_limit_reached=on_subtask_limit_reached,
+                    on_subtask_started=on_subtask_started,
+                )
+                session.update_task(task)
+            except KeyboardInterrupt:
+                if not task.is_terminal:
+                    task = task.cancel()
+                session.update_task(task)
+                raise
+            except Exception as exc:
+                logger.error(
+                    "error inesperado ejecutando task existente",
+                    task_id=task.id,
+                    error=str(exc),
+                )
+                if not task.is_terminal:
+                    task = task.fail()
+                session.update_task(task)
+
+        return self._build_output(task=task, duration_seconds=time.monotonic() - start_time)
+
+    def _load_task_from_workspace(
+        self,
+        task_id: str,
+        workspace_id: str,
+    ) -> Task | None:
+        """
+        Busca una task por ID dentro de todos los proyectos del workspace.
+
+        Devuelve None si no se encuentra en ningún proyecto.
+        """
+        try:
+            workspace = self._store.workspaces.find_by_id_meta(workspace_id)
+        except EntityNotFound:
+            return None
+
+        for project_id in [p.id for p in workspace.projects]:
+            try:
+                if self._locator.task_exists(workspace_id, project_id, task_id):
+                    return self._store.tasks.find_by_id(
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                    )
+            except Exception:
+                continue
+
+        return None
