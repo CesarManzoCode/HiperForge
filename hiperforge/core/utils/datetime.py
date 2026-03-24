@@ -26,7 +26,7 @@ USO:
 
   created_at = utcnow()                    # datetime con UTC garantizado
   label = format_duration(125.4)           # "2m 5s"
-  dt = parse_iso("2024-01-15T14:32:01Z")   # datetime con UTC
+  dt = parse_iso("2024-01-15T14:32:01Z")  # datetime con UTC
 """
 
 from __future__ import annotations
