@@ -203,13 +203,6 @@ class Workspace:
                 f"El workspace '{self.name}' debe estar ACTIVE."
             )
 
-        # Verificamos que el proyecto pertenece a este workspace
-        if project.workspace_id != self.id:
-            raise ValueError(
-                f"El Project '{project.id}' pertenece al workspace '{project.workspace_id}', "
-                f"no a '{self.id}'."
-            )
-
         # Nombre único dentro del workspace (solo entre proyectos activos/archivados)
         existing_names = {
             p.name.lower()

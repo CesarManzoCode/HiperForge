@@ -304,6 +304,36 @@ class Project:
             updated_at=datetime.now(timezone.utc),
         )
 
+    def add_tag(self, tag: str) -> Project:
+        """Agrega una etiqueta al proyecto. No duplica si ya existe."""
+        if tag in self.tags:
+            return self
+        return Project(
+            id=self.id,
+            workspace_id=self.workspace_id,
+            name=self.name,
+            description=self.description,
+            status=self.status,
+            tags=(*self.tags, tag),
+            tasks=self.tasks,
+            created_at=self.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def remove_tag(self, tag: str) -> Project:
+        """Elimina una etiqueta del proyecto si existe."""
+        return Project(
+            id=self.id,
+            workspace_id=self.workspace_id,
+            name=self.name,
+            description=self.description,
+            status=self.status,
+            tags=tuple(t for t in self.tags if t != tag),
+            tasks=self.tasks,
+            created_at=self.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+
     def update_tags(self, tags: list[str]) -> Project:
         """Reemplaza las etiquetas del proyecto."""
         return Project(

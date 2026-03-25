@@ -31,6 +31,7 @@ USO:
 
 from __future__ import annotations
 
+import time as _time
 from datetime import datetime, timedelta, timezone
 
 
@@ -207,18 +208,21 @@ def format_timestamp(dt: datetime, *, include_date: bool = True) -> str:
     return local_dt.strftime("%H:%M:%S")
 
 
-def seconds_since(dt: datetime) -> float:
+def seconds_since(dt: datetime | float) -> float:
     """
     Calcula cuántos segundos pasaron desde un momento hasta ahora.
 
     Útil para medir duración de operaciones en curso.
 
     Parámetros:
-        dt: datetime del inicio (debe tener timezone).
+        dt: datetime del inicio (debe tener timezone), o float de time.monotonic().
 
     Returns:
         Segundos transcurridos. Negativo si dt está en el futuro.
     """
+    if isinstance(dt, float):
+        return round(_time.monotonic() - dt, 3)
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
 

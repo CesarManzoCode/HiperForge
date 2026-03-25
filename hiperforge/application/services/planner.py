@@ -803,9 +803,15 @@ class PlannerService:
             "add", "create", "fix", "change", "update", "rename",
         })
 
-        # Contar indicadores presentes
-        complex_count = sum(1 for kw in complex_keywords if kw in prompt_lower)
-        simple_count = sum(1 for kw in simple_keywords if kw in prompt_lower)
+        # Contar indicadores presentes (usando límites de palabra para evitar
+        # falsos positivos como "implement" dentro de "implementa")
+        _boundary = r"(?<![a-záéíóúñü]){kw}(?![a-záéíóúñü])"
+
+        def _matches(kw: str) -> bool:
+            return bool(re.search(_boundary.format(kw=re.escape(kw)), prompt_lower))
+
+        complex_count = sum(1 for kw in complex_keywords if _matches(kw))
+        simple_count = sum(1 for kw in simple_keywords if _matches(kw))
 
         # Detección de tarea de archivo único: "crea un script/archivo/clase/módulo"
         # Estas tareas SIEMPRE deben ser SIMPLE (max 2 subtasks, idealmente 1)

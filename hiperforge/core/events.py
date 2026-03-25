@@ -154,6 +154,11 @@ class AgentEvent:
     occurred_at: datetime
     data: dict[str, Any]
 
+    @property
+    def timestamp(self) -> datetime:
+        """Alias de occurred_at para compatibilidad."""
+        return self.occurred_at
+
     # ------------------------------------------------------------------
     # Factory methods — un constructor semántico por tipo de evento.
     # Garantizan que cada evento lleve los campos correctos.
