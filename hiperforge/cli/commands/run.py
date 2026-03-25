@@ -72,6 +72,7 @@ VARIACIONES DE COMPORTAMIENTO SEGÚN FLAGS
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import sys
 from typing import Optional
 
@@ -220,8 +221,10 @@ def run_command(
             auto_confirm=yes,
         )
 
-        # ── Ejecutar con spinner activo ───────────────────────────────
-        with spinner.attach(get_event_bus()):
+        # El Live spinner interfiere con prompts interactivos en algunas TTYs.
+        spinner_context = spinner.attach(get_event_bus()) if yes else nullcontext()
+
+        with spinner_context:
             output = container.run_task.execute(
                 input_data,
                 on_confirm_plan=plan_view.confirm_callback,
@@ -470,7 +473,9 @@ def task_run(
             auto_confirm=yes,
         )
 
-        with spinner.attach(get_event_bus()):
+        spinner_context = spinner.attach(get_event_bus()) if yes else nullcontext()
+
+        with spinner_context:
             output = container.run_task.execute(
                 input_data,
                 on_confirm_plan=plan_view.confirm_callback,
