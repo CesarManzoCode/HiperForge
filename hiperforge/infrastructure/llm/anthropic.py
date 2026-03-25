@@ -431,17 +431,16 @@ class AnthropicAdapter(BaseLLMAdapter):
         content: str,
     ) -> tuple[list[ToolCallRequest], str, str, str | None]:
         """
-        Parsea el contenido del LLM buscando una acción JSON.
+        Parsea TODOS los bloques JSON de acción del contenido del LLM.
 
-        El LLM puede responder con tres formatos:
-          1. JSON con action=tool_call  → devuelve ToolCallRequest
-          2. JSON con action=complete  → devuelve finish_reason="complete"
-          3. JSON con action=think     → devuelve el content del pensamiento
-          4. Texto libre               → lo devuelve tal cual (razonamiento libre)
+        OPTIMIZACIÓN CLAVE: Cuando el LLM genera múltiples bloques tool_call
+        consecutivos, los parseamos TODOS y los retornamos como lista de
+        ToolCallRequests. Antes se descartaban todos menos el primero,
+        desperdiciando los tokens de output y forzando al LLM a re-generar
+        las acciones descartadas en iteraciones posteriores.
 
         Returns:
-            Tupla (tool_calls, content_limpio, finish_reason).
-            tool_calls está vacío si no hay tool call.
+            Tupla (tool_calls, content_limpio, finish_reason, deferred_summary).
         """
         stripped = content.strip()
 
@@ -451,8 +450,6 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         blocks, trailing_content = self._extract_json_object_blocks(stripped)
         if not blocks:
-            # JSON malformado — tratamos como texto libre
-            # Loggeamos para debug pero no rompemos el flujo
             logger.warning(
                 "LLM devolvió JSON malformado, tratando como texto",
                 content_preview=stripped[:200],
@@ -461,66 +458,65 @@ class AnthropicAdapter(BaseLLMAdapter):
             )
             return [], content, "stop", None
 
-        if len(blocks) > 1 or trailing_content:
-            logger.warning(
-                "LLM devolvió múltiples bloques JSON; usando el primero",
-                content_preview=stripped[:200],
-                trailing_preview=(
-                    trailing_content[:120]
-                    if trailing_content
-                    else json.dumps(blocks[1], ensure_ascii=False)[:120]
-                ),
-                provider="anthropic",
-                task_id=self._task_id,
-            )
+        # Recolectar TODAS las tool_calls y buscar un complete diferido
+        tool_calls: list[ToolCallRequest] = []
+        deferred_summary: str | None = None
+        first_non_tool_action: str | None = None
+        first_non_tool_content: str | None = None
 
-        parsed = blocks[0]
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
 
-        deferred_summary = None
-        for extra_block in blocks[1:]:
-            if extra_block.get(_ACTION_FIELD) == _ACTION_COMPLETE:
-                deferred_summary = str(extra_block.get("summary", "")).strip() or None
-                break
+            action = block.get(_ACTION_FIELD, "")
 
-        action = parsed.get(_ACTION_FIELD, "")
+            if action == _ACTION_TOOL_CALL:
+                tool_name = block.get("tool", "")
+                arguments = block.get("arguments", {})
+                if tool_name:
+                    tool_calls.append(ToolCallRequest(
+                        tool_call_id=generate_id(),
+                        tool_name=tool_name,
+                        arguments=arguments if isinstance(arguments, dict) else {},
+                    ))
 
-        if action == _ACTION_TOOL_CALL:
-            # El LLM quiere ejecutar una tool
-            tool_name = parsed.get("tool", "")
-            arguments = parsed.get("arguments", {})
+            elif action == _ACTION_COMPLETE:
+                summary = str(block.get("summary", "")).strip()
+                if tool_calls:
+                    deferred_summary = summary or None
+                else:
+                    return [], summary, "complete", None
 
-            if not tool_name:
-                logger.warning(
-                    "LLM solicitó tool_call sin nombre de tool",
-                    parsed=parsed,
+            elif action == _ACTION_THINK:
+                if first_non_tool_action is None:
+                    first_non_tool_action = "think"
+                    first_non_tool_content = block.get("content", "")
+
+        # Si recolectamos tool_calls, retornarlas todas
+        if tool_calls:
+            if len(tool_calls) > 1:
+                logger.info(
+                    "LLM generó múltiples tool_calls — ejecutando todas",
+                    count=len(tool_calls),
+                    tools=[tc.tool_name for tc in tool_calls],
+                    provider="anthropic",
                     task_id=self._task_id,
                 )
-                return [], content, "stop", None
+            return tool_calls, "", "tool_use", deferred_summary
 
-            tool_call = ToolCallRequest(
-                tool_call_id=generate_id(),
-                tool_name=tool_name,
-                arguments=arguments if isinstance(arguments, dict) else {},
-            )
-
-            return [tool_call], "", "tool_use", deferred_summary
-
-        if action == _ACTION_COMPLETE:
-            # El LLM indica que la subtask está completa
-            summary = parsed.get("summary", "")
-            return [], summary, "complete", None
-
-        if action == _ACTION_THINK:
-            # Razonamiento explícito del agente
-            think_content = parsed.get("content", "")
-            return [], think_content, "stop", None
+        # Si solo hubo un think
+        if first_non_tool_action == "think":
+            return [], first_non_tool_content or "", "stop", None
 
         # Acción desconocida — tratamos como texto libre
-        logger.warning(
-            "LLM devolvió acción desconocida",
-            action=action,
-            task_id=self._task_id,
-        )
+        parsed = blocks[0]
+        action = parsed.get(_ACTION_FIELD, "")
+        if action:
+            logger.warning(
+                "LLM devolvió acción desconocida",
+                action=action,
+                task_id=self._task_id,
+            )
         return [], content, "stop", None
 
     def _normalize_finish_reason(self, anthropic_reason: str) -> str:

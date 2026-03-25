@@ -128,8 +128,8 @@ class TaskComplexity(str, Enum):
 
 # Límites de subtasks por nivel de complejidad
 _MAX_SUBTASKS_BY_COMPLEXITY: dict[TaskComplexity, int] = {
-    TaskComplexity.SIMPLE:  3,
-    TaskComplexity.MEDIUM:  8,
+    TaskComplexity.SIMPLE:  2,
+    TaskComplexity.MEDIUM:  5,
     TaskComplexity.COMPLEX: REACT_MAX_SUBTASKS,
 }
 
@@ -170,53 +170,33 @@ class RawPlan:
 # ---------------------------------------------------------------------------
 
 _PLANNING_SYSTEM_PROMPT = """\
-Eres un planificador de tareas de desarrollo de software experto.
-Tu trabajo es descomponer una instrucción del desarrollador en pasos concretos,
-ordenados y ejecutables por un agente autónomo.
+Eres un planificador de tareas de desarrollo. Descompón la instrucción en los MÍNIMOS pasos necesarios.
 
-FORMATO DE RESPUESTA OBLIGATORIO — responde SOLO con este JSON, sin texto adicional:
+FORMATO — responde SOLO con este JSON:
 {{
   "subtasks": [
-    {{"description": "<paso concreto y verificable>", "order": 0}},
-    {{"description": "<paso concreto y verificable>", "order": 1}}
+    {{"description": "<paso concreto y verificable>", "order": 0}}
   ],
-  "summary": "<resumen del plan en una línea>"
+  "summary": "<resumen en una línea>"
 }}
 
-REGLAS PARA SUBTASKS DE CALIDAD:
-  ✓ Cada subtask debe ser un paso concreto que el agente puede ejecutar con herramientas.
-  ✓ La descripción debe indicar QUÉ hacer y CÓMO verificarlo.
-  ✓ Mantén cada descripción entre 60 y 220 caracteres si es posible.
-  ✓ Máximo {max_subtasks} subtasks. Agrupa pasos pequeños si es necesario.
-  ✓ Ordena las subtasks en la secuencia lógica de ejecución.
-  ✓ Cada subtask debe poder verificarse — el agente confirmará su completación.
-  ✓ Si el usuario no pidió documentación, README o limpieza extra, no la agregues al plan.
+REGLA PRINCIPAL: USA EL MENOR NÚMERO DE SUBTASKS POSIBLE.
+- Si la tarea es crear/modificar un solo archivo → USA 1 SUBTASK que incluya creación Y verificación.
+- Si la tarea requiere varios archivos independientes → 1 subtask por archivo.
+- Máximo {max_subtasks} subtasks. Prefiere MENOS.
+- Cada subtask debe indicar QUÉ hacer y CÓMO verificarlo.
+- No agregues pasos de documentación, README, limpieza o tests salvo que se pidan.
+- No incluyas pasos vagos como "asegurarse de que funciona".
 
-  ✗ No incluyas pasos vagos: "asegurarse de que funciona", "revisar todo".
-  ✗ No incluyas pasos de configuración del entorno que ya deberían estar listos.
-  ✗ No repitas la misma acción en múltiples subtasks.
-  ✗ No incluyas más de una responsabilidad diferente por subtask.
-  ✗ No metas trabajo accesorio "por si acaso" como README, refactors amplios o tests no solicitados.
-
-EJEMPLOS DE SUBTASKS BUENAS vs MALAS:
-
-  MALA:  "Implementar la autenticación"
-  BUENA: "Crear el archivo auth/middleware.py con la función verify_token(token: str) -> User"
-
-  MALA:  "Asegurarse de que los tests pasen"
-  BUENA: "Ejecutar pytest tests/auth/ -v y verificar que todos los tests pasan"
-
-  MALA:  "Configurar el proyecto"
-  BUENA: "Agregar las dependencias python-jose y passlib[bcrypt] al requirements.txt"
+EJEMPLO:
+  Tarea: "crea un script Python que lea un CSV y genere un reporte en HTML"
+  Plan correcto (1 subtask):
+  {{"subtasks": [{{"description": "Crear script report.py que lea CSV con csv.DictReader, genere HTML con tabla escapada (html.escape), acepte args --csv y --html. Verificar con py_compile.", "order": 0}}], "summary": "Script CSV→HTML"}}
 """
 
 _PLANNING_USER_TEMPLATE = """\
-Genera un plan para completar esta tarea de desarrollo:
-
-{prompt}
-
-Complejidad estimada: {complexity}
-Máximo de subtasks: {max_subtasks}
+Tarea: {prompt}
+Complejidad: {complexity}. Máximo {max_subtasks} subtasks (prefiere menos).
 """
 
 _RETRY_FEEDBACK_TEMPLATE = """\
@@ -800,6 +780,7 @@ class PlannerService:
           - Longitud del prompt (prompts más largos → más complejos)
           - Palabras clave que indican alcance amplio
           - Número de verbos de acción (cada verbo puede ser una subtask)
+          - Detección de tareas de archivo único (crea un script, un archivo, etc.)
 
         Esta clasificación es una ESTIMACIÓN — el planner puede generar
         más o menos subtasks de lo esperado. La clasificación afecta los
@@ -816,7 +797,7 @@ class PlannerService:
             "entire", "complete", "full", "system",
         })
 
-        # Indicadores de baja complejidad
+        # Indicadores de baja complejidad — tareas de un solo artefacto
         simple_keywords: frozenset[str] = frozenset({
             "agrega", "crea", "añade", "cambia", "arregla", "corrige",
             "add", "create", "fix", "change", "update", "rename",
@@ -825,6 +806,21 @@ class PlannerService:
         # Contar indicadores presentes
         complex_count = sum(1 for kw in complex_keywords if kw in prompt_lower)
         simple_count = sum(1 for kw in simple_keywords if kw in prompt_lower)
+
+        # Detección de tarea de archivo único: "crea un script/archivo/clase/módulo"
+        # Estas tareas SIEMPRE deben ser SIMPLE (max 2 subtasks, idealmente 1)
+        single_file_patterns: tuple[str, ...] = (
+            "crea un script", "crea un archivo", "crea una clase",
+            "crea un módulo", "crea un programa", "crea un fichero",
+            "escribe un script", "escribe un archivo", "escribe un programa",
+            "create a script", "create a file", "create a class",
+            "create a module", "create a program", "write a script",
+            "write a file", "write a program",
+        )
+        is_single_file = any(pattern in prompt_lower for pattern in single_file_patterns)
+
+        if is_single_file and word_count <= 30:
+            return TaskComplexity.SIMPLE
 
         # Clasificar por combinación de factores
         if complex_count >= 2 or word_count > 50:

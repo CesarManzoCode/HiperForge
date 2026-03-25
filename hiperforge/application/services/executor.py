@@ -82,6 +82,8 @@ from typing import Any, Callable
 from hiperforge.core.constants import (
     LLM_DEFAULT_MAX_TOKENS_REACT,
     REACT_MAX_ITERATIONS_PER_SUBTASK,
+    REACT_MAX_ITERATIONS_SIMPLE,
+    REACT_MAX_ITERATIONS_MEDIUM,
     REACT_MAX_TOOL_RETRIES,
     REACT_RETRY_DELAY_SECONDS,
 )
@@ -275,6 +277,9 @@ class ExecutorService:
 
         total_subtasks = len(task.subtasks)
 
+        # Resumen de la subtask anterior — se pasa como contexto a la siguiente
+        previous_subtask_summary: str | None = None
+
         # Ejecutar cada subtask en el orden del plan
         for index, subtask in enumerate(task.subtasks):
             # Notificar a la CLI del inicio de la subtask (informativo)
@@ -286,11 +291,18 @@ class ExecutorService:
                 task=task,
                 subtask=subtask,
                 on_limit_reached=on_subtask_limit_reached,
+                previous_subtask_summary=previous_subtask_summary,
             )
 
             # Actualizar referencias locales con el estado más reciente
             task = execution_result.task
             subtask = execution_result.subtask
+
+            # Capturar resumen de esta subtask para pasarlo a la siguiente
+            if subtask.status == SubtaskStatus.COMPLETED:
+                previous_subtask_summary = subtask.reasoning or subtask.description
+            else:
+                previous_subtask_summary = None
 
             log.info(
                 "subtask finalizada",
@@ -357,12 +369,17 @@ class ExecutorService:
         task: Task,
         subtask: Subtask,
         on_limit_reached: Callable[[Subtask, int], LimitDecision] | None,
+        previous_subtask_summary: str | None = None,
     ) -> SubtaskExecutionResult:
         """
         Ejecuta una subtask completa con su loop ReAct.
 
         Gestiona el historial de mensajes, los eventos, la detección
         de bucles y el manejo del límite de iteraciones.
+
+        Parámetros:
+            previous_subtask_summary: Resumen de la subtask anterior completada.
+                                      Permite continuidad sin historial completo.
 
         Returns:
             SubtaskExecutionResult con el estado final y las métricas.
@@ -402,7 +419,14 @@ class ExecutorService:
         )
 
         # Crear la sesión en memoria con el contexto inicial de esta subtask
-        session = self._initialize_subtask_session(task=task, subtask=subtask)
+        session = self._initialize_subtask_session(
+            task=task,
+            subtask=subtask,
+            previous_subtask_summary=previous_subtask_summary,
+        )
+
+        # Calcular iteraciones máximas dinámicamente según complejidad del plan
+        max_iterations = self._max_iterations_for_plan(len(task.subtasks))
 
         # Estado interno del loop
         iteration = 0
@@ -412,13 +436,13 @@ class ExecutorService:
         # ──────────────────────────────────────────────────────────────
         # LOOP REACT
         # ──────────────────────────────────────────────────────────────
-        while iteration < REACT_MAX_ITERATIONS_PER_SUBTASK:
+        while iteration < max_iterations:
             iteration += 1
 
             log.debug(
                 "iteración ReAct",
                 iteration=iteration,
-                max=REACT_MAX_ITERATIONS_PER_SUBTASK,
+                max=max_iterations,
                 messages_in_history=session.message_count,
             )
 
@@ -516,7 +540,7 @@ class ExecutorService:
             log.warning(
                 "subtask no completada — límite de iteraciones alcanzado",
                 iteration=iteration,
-                max=REACT_MAX_ITERATIONS_PER_SUBTASK,
+                max=max_iterations,
             )
             subtask, task = self._handle_limit_reached(
                 task=task,
@@ -632,17 +656,17 @@ class ExecutorService:
             )
 
         # ── CASE 3: El agente está razonando (action=think) ────────────
+        # OPTIMIZACIÓN: No agregamos el contenido del think al historial.
+        # El LLM ya gastó los tokens de output generándolo, pero evitamos
+        # que esos tokens se re-lean como input en la siguiente iteración.
+        # Esto ahorra ~200-500 tokens de input por cada think innecesario.
         if response.has_content:
             log.debug(
-                "agente razonando",
+                "agente razonando (no persistido en historial)",
                 iteration=iteration,
                 content_preview=response.content[:100],
             )
 
-            subtask = subtask.update_reasoning(response.content)
-            task = task.update_subtask(subtask)
-
-            session.push_message(Message.assistant(response.content))
             session.record_event(
                 SessionEventType.REACT_ITERATION,
                 {
@@ -990,6 +1014,40 @@ class ExecutorService:
             return failed, task
 
     # ------------------------------------------------------------------
+    # Iteraciones dinámicas según complejidad del plan
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _max_iterations_for_plan(subtask_count: int) -> int:
+        """
+        Calcula el máximo de iteraciones ReAct por subtask según la complejidad del plan.
+
+        Un plan con pocas subtasks (1-2) indica una tarea simple donde cada
+        subtask debería resolverse en 2-3 iteraciones. Permitir 15 iteraciones
+        en este caso solo invita al agente a vagabundear, explorar y reverificar
+        sin necesidad.
+
+        Un plan con muchas subtasks (6+) indica tarea compleja donde cada
+        subtask puede requerir más intentos para resolver problemas inesperados.
+
+        MAPEO:
+          1-2 subtasks → REACT_MAX_ITERATIONS_SIMPLE (5)
+          3-5 subtasks → REACT_MAX_ITERATIONS_MEDIUM  (8)
+          6+  subtasks → REACT_MAX_ITERATIONS_PER_SUBTASK (15)
+
+        Parámetros:
+            subtask_count: Número total de subtasks en el plan.
+
+        Returns:
+            Máximo de iteraciones permitidas por subtask.
+        """
+        if subtask_count <= 2:
+            return REACT_MAX_ITERATIONS_SIMPLE
+        if subtask_count <= 5:
+            return REACT_MAX_ITERATIONS_MEDIUM
+        return REACT_MAX_ITERATIONS_PER_SUBTASK
+
+    # ------------------------------------------------------------------
     # Detección de bucles
     # ------------------------------------------------------------------
 
@@ -1118,28 +1176,32 @@ class ExecutorService:
         self,
         task: Task,
         subtask: Subtask,
+        previous_subtask_summary: str | None = None,
     ) -> InMemorySession:
         """
         Crea e inicializa la sesión en memoria para una subtask.
 
         El historial inicial contiene exactamente dos mensajes:
           1. Sistema: instrucciones del agente + tools disponibles + contexto
+             + resumen de la subtask anterior (si existe)
           2. Usuario: descripción de la subtask a completar
 
-        Este historial limpio por subtask garantiza que el LLM no se
-        confunda con el contexto de subtasks anteriores.
+        El resumen de la subtask anterior permite continuidad entre subtasks
+        sin pasar el historial completo — el agente sabe qué archivos se
+        crearon y qué se verificó sin tener que explorar de nuevo.
         """
         workspace_id = self._store.get_active_workspace_id() or ""
 
         session = InMemorySession(task=task, workspace_id=workspace_id)
         session.set_active_subtask(subtask.id)
 
-        # Mensaje 1: sistema con instrucciones completas
+        # Mensaje 1: sistema con instrucciones completas + contexto anterior
         system_msg = self._context_builder.build_system_message(
             subtask_description=subtask.description,
             task_prompt=task.prompt,
             working_dir=os.getcwd(),
             max_retries=REACT_MAX_TOOL_RETRIES,
+            previous_subtask_summary=previous_subtask_summary,
         )
         session.push_message(system_msg)
 

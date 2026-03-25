@@ -25,13 +25,10 @@ FORMATO DE COMUNICACIÓN DEL AGENTE:
   El agente se comunica con el LLM usando JSON estructurado en el content.
   Este módulo define ese protocolo y lo documenta en el prompt de sistema.
 
-  El LLM SIEMPRE responde con uno de estos tres formatos:
+  El LLM SIEMPRE responde con uno de estos dos formatos:
 
     Ejecutar una tool:
       {"action": "tool_call", "tool": "<nombre>", "arguments": {<args>}}
-
-    Razonar sin actuar (pensar en voz alta):
-      {"action": "think", "content": "<razonamiento>"}
 
     Indicar que la subtask está completa:
       {"action": "complete", "summary": "<qué se logró>"}
@@ -83,27 +80,24 @@ logger = get_logger(__name__)
 
 _SYSTEM_PROMPT_BASE = """\
 Eres HiperForge, un agente autónomo de desarrollo.
-Completa la subtask con las herramientas disponibles y responde SOLO JSON.
+Completa la subtask con las herramientas disponibles.
+Responde SOLO con UN bloque JSON por turno. No generes múltiples bloques JSON.
 
-PROTOCOLO:
-1. Tool:
+PROTOCOLO (elige exactamente uno):
+1. Ejecutar herramienta:
 {{"action":"tool_call","tool":"<nombre>","arguments":{{<args>}}}}
-2. Think:
-{{"action":"think","content":"<razonamiento breve>"}}
-3. Complete:
+2. Subtask completada:
 {{"action":"complete","summary":"<qué hiciste y cómo lo verificaste>"}}
 
-REGLAS:
-- Usa la herramienta más específica posible.
-- Si ya conoces el archivo objetivo, actúa directamente sobre él; no explores el repo sin necesidad.
-- No uses listados amplios (`ls`, `find`, `file list`) salvo que la ubicación sea realmente desconocida.
-- No releas completo un archivo que acabas de escribir o parchear, salvo que necesites una línea puntual.
-- Tras un cambio exitoso, verifica una vez; si ya quedó comprobado, responde con "complete".
-- No repitas la misma acción fallida sin cambiar algo.
-- No repitas verificaciones equivalentes que ya pasaron.
-- Lee errores completos antes de reintentar.
-- Usa "complete" solo si verificaste el resultado o si explicas claramente el bloqueo.
-- Intenta como máximo {max_retries} estrategias distintas.
+REGLAS CRÍTICAS:
+- Actúa directo. Si sabes qué hacer, hazlo sin explorar.
+- NUNCA releas un archivo que acabas de escribir — ya conoces su contenido.
+- Tras un cambio exitoso, verifica UNA vez y responde "complete".
+- No repitas acciones fallidas sin cambiar la estrategia.
+- No uses listados amplios (ls, find, file list) salvo que la ubicación sea desconocida.
+- Si una tool falla, lee el error completo y cambia de enfoque.
+- Máximo {max_retries} estrategias distintas antes de completar con lo que tengas.
+- Responde con "complete" en cuanto la verificación pase.
 """
 
 # Plantilla para la sección de tools disponibles
@@ -114,9 +108,9 @@ _SUBTASK_CONTEXT_TEMPLATE = """\
 CONTEXTO:
 - Tarea: {task_prompt}
 - Subtask: {subtask_description}
-- Directorio: {working_dir}
-
-Completa la subtask y responde SOLO con JSON válido.\
+- Dir: {working_dir}
+{previous_context}
+Completa la subtask y responde SOLO con UN bloque JSON.\
 """
 
 
@@ -147,6 +141,7 @@ class ContextBuilder:
         *,
         working_dir: str | None = None,
         max_retries: int = 3,
+        previous_subtask_summary: str | None = None,
     ) -> Message:
         """
         Construye el mensaje de sistema completo para una subtask.
@@ -156,14 +151,18 @@ class ContextBuilder:
           1. Instrucciones base del agente y protocolo de comunicación
           2. Lista de herramientas disponibles con sus parámetros
           3. Contexto específico de la task y subtask actuales
+          4. Resumen de la subtask anterior (si existe) para continuidad
 
         Parámetros:
-            subtask_description: Qué debe hacer el agente en esta subtask.
-            task_prompt:         Instrucción original del usuario (contexto global).
-            working_dir:         Directorio de trabajo del proyecto.
-                                 None = usa el directorio actual del proceso.
-            max_retries:         Máximo de estrategias que el agente intenta
-                                 antes de rendirse. Se inyecta en el prompt.
+            subtask_description:      Qué debe hacer el agente en esta subtask.
+            task_prompt:              Instrucción original del usuario (contexto global).
+            working_dir:              Directorio de trabajo del proyecto.
+                                      None = usa el directorio actual del proceso.
+            max_retries:              Máximo de estrategias que el agente intenta
+                                      antes de rendirse. Se inyecta en el prompt.
+            previous_subtask_summary: Resumen de la subtask anterior completada.
+                                      Permite continuidad entre subtasks sin
+                                      pasar historial completo.
 
         Returns:
             Message con role=SYSTEM listo para incluir en el historial.
@@ -171,6 +170,13 @@ class ContextBuilder:
         effective_dir = working_dir or os.getcwd()
         compact_task_prompt = task_prompt.strip()[:240]
         compact_subtask_description = subtask_description.strip()[:280]
+
+        # Construir contexto de subtask anterior si existe
+        previous_context = ""
+        if previous_subtask_summary:
+            # Limitar a 200 chars para no inflar el prompt
+            trimmed = previous_subtask_summary.strip()[:200]
+            previous_context = f"- Paso anterior completó: {trimmed}"
 
         sections: list[str] = []
 
@@ -184,12 +190,13 @@ class ContextBuilder:
         if tools_section:
             sections.append(tools_section)
 
-        # Sección 3: contexto de la subtask actual
+        # Sección 3: contexto de la subtask actual + resumen de anterior
         sections.append(
             _SUBTASK_CONTEXT_TEMPLATE.format(
                 task_prompt=compact_task_prompt,
                 subtask_description=compact_subtask_description,
                 working_dir=effective_dir,
+                previous_context=previous_context,
             )
         )
 
@@ -222,23 +229,25 @@ class ContextBuilder:
         lines: list[str] = [_TOOLS_SECTION_HEADER]
 
         for schema in schemas:
-            # Encabezado de la tool
-            lines.append(f'- {schema.name}: {schema.description.split(".")[0].strip()[:72]}')
+            # Encabezado compacto de la tool
+            lines.append(f'- {schema.name}: {schema.description.split(".")[0].strip()[:60]}')
 
-            # Parámetros
+            # Solo parámetros requeridos para reducir tokens
             props: dict[str, Any] = schema.parameters.get("properties", {})
             required: list[str] = schema.parameters.get("required", [])
 
-            if props:
-                lines.append("  Params:")
-                for param_name, param_info in props.items():
-                    is_req = "*" if param_name in required else ""
+            if required:
+                req_parts = []
+                for param_name in required:
+                    param_info = props.get(param_name, {})
                     param_type = param_info.get("type", "any")
-                    param_desc = param_info.get("description", "")
-                    first_line = param_desc.split("\n")[0].strip()[:48]
-                    lines.append(
-                        f"    - {param_name}{is_req} ({param_type}): {first_line}"
-                    )
+                    req_parts.append(f"{param_name}({param_type})")
+                lines.append(f"  Requeridos: {', '.join(req_parts)}")
+
+            # Parámetros opcionales solo como lista de nombres
+            optional = [p for p in props if p not in required]
+            if optional:
+                lines.append(f"  Opcionales: {', '.join(optional)}")
 
         return "\n".join(lines)
 

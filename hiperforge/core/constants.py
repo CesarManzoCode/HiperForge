@@ -89,9 +89,9 @@ LLM_DEFAULT_MODEL_OLLAMA = "llama3"
 # Parámetros de generación — bajos para el agente (queremos precisión, no creatividad)
 LLM_DEFAULT_TEMPERATURE = 0.2
 LLM_DEFAULT_MAX_TOKENS = 4096
-LLM_DEFAULT_MAX_TOKENS_PLANNING = 2048   # el plan no necesita respuestas largas
+LLM_DEFAULT_MAX_TOKENS_PLANNING = 1024   # el plan no necesita respuestas largas
 LLM_DEFAULT_MAX_TOKENS_SUMMARY = 1024    # el resumen final tampoco
-LLM_DEFAULT_MAX_TOKENS_REACT = 1536      # cada iteración ReAct debe ser corta
+LLM_DEFAULT_MAX_TOKENS_REACT = 1024      # cada iteración ReAct debe ser corta y concreta
 
 # Tamaño del context window por defecto (para modelos desconocidos)
 LLM_DEFAULT_CONTEXT_WINDOW = 8_192
@@ -116,6 +116,14 @@ LLM_TOOL_RESULT_MAX_CHARS = 1_200
 # Evita loops infinitos cuando el agente no puede avanzar.
 # Un agente que itera más de esto probablemente está atascado.
 REACT_MAX_ITERATIONS_PER_SUBTASK = 15
+
+# Iteraciones dinámicas según complejidad del plan.
+# El executor usa el número de subtasks como proxy de complejidad:
+#   1-2 subtasks → SIMPLE → pocas iteraciones por subtask
+#   3-5 subtasks → MEDIUM → iteraciones moderadas
+#   6+  subtasks → COMPLEX → máximo de iteraciones
+REACT_MAX_ITERATIONS_SIMPLE = 5
+REACT_MAX_ITERATIONS_MEDIUM = 8
 
 # Máximo de subtasks que puede tener un plan.
 # Planes muy largos suelen ser síntoma de un prompt muy vago.
