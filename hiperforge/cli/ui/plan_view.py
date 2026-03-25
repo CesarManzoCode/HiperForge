@@ -433,19 +433,15 @@ class PlanView:
             "[[bold green]S[/bold green]]í  "
             "[[bold red]N[/bold red]]o"
         )
-        self._console.print("[dim]Escribe S o N y presiona Enter.[/dim]")
+        self._console.print("[dim]Responde y presiona Enter.[/dim]")
 
         try:
-            answer = Prompt.ask(
-                "Respuesta",
-                choices=["s", "n", "si", "sí", "no", "y", "yes"],
-                default="s",
-                show_choices=False,
+            return Confirm.ask(
+                "Ejecutar ahora",
+                default=True,
                 show_default=False,
                 console=self._console,
-            ).lower().strip()
-
-            return answer in {"s", "si", "sí", "y", "yes"}
+            )
 
         except (EOFError, KeyboardInterrupt):
             # Sin terminal interactiva o Ctrl+C durante el prompt

@@ -172,7 +172,7 @@ def run_command(
     """
     error_handler = ErrorHandler.from_settings(debug=debug)
     renderer = Renderer(verbose=verbose)
-    console = Console()
+    console = Console(stderr=True, highlight=False)
 
     with error_handler.context("run"):
         # ── Construir el container con las dependencias ────────────────
@@ -435,7 +435,7 @@ def task_run(
     """
     error_handler = ErrorHandler.from_settings(debug=debug)
     renderer = Renderer(verbose=verbose)
-    console = Console()
+    console = Console(stderr=True, highlight=False)
 
     with error_handler.context("task run"):
         container = _build_container(
