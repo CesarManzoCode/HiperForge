@@ -433,10 +433,11 @@ class PlanView:
             "[[bold green]S[/bold green]]í  "
             "[[bold red]N[/bold red]]o"
         )
+        self._console.print("[dim]Escribe S o N y presiona Enter.[/dim]")
 
         try:
             answer = Prompt.ask(
-                "",
+                "Respuesta",
                 choices=["s", "n", "si", "sí", "no", "y", "yes"],
                 default="s",
                 show_choices=False,

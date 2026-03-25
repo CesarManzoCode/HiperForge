@@ -124,7 +124,7 @@ class SessionFlusher:
 
         try:
             # Paso 1: persistir la task con todo su estado actual
-            self._storage.save_task(task)
+            self._save_task(task)
 
             # Paso 2: persistir el log de eventos de la sesión
             self._flush_session_log()
@@ -151,6 +151,29 @@ class SessionFlusher:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+
+    def _save_task(self, task) -> None:
+        """
+        Persiste la task actual.
+
+        Las tasks ligadas a proyecto usan JSONStorage.save_task().
+        Las tasks sueltas se guardan directamente bajo el workspace activo.
+        """
+        if task.project_id is None:
+            path = self._locator.workspace_task_file(
+                workspace_id=self._session.workspace_id,
+                task_id=task.id,
+            )
+            self._storage.write_json(path, task.to_dict())
+            logger.debug(
+                "task suelta guardada",
+                task_id=task.id,
+                workspace_id=self._session.workspace_id,
+                status=task.status.value,
+            )
+            return
+
+        self._storage.save_task(task)
 
     def flush_on_interrupt(self) -> None:
         """

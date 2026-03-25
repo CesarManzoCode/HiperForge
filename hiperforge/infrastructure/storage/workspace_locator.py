@@ -200,17 +200,37 @@ class WorkspaceLocator:
         """
         return self.project_dir(workspace_id, project_id) / "tasks"
 
+    def workspace_tasks_dir(self, workspace_id: str) -> Path:
+        """
+        ~/.hiperforge/workspaces/{workspace_id}/tasks/
+
+        Aquí viven las tasks sueltas que no pertenecen a ningún proyecto.
+        """
+        return self.workspace_dir(workspace_id) / "tasks"
+
     def task_dir(self, workspace_id: str, project_id: str, task_id: str) -> Path:
         """
         ~/.hiperforge/workspaces/{workspace_id}/projects/{project_id}/tasks/{task_id}/
         """
         return self.tasks_dir(workspace_id, project_id) / task_id
 
+    def workspace_task_dir(self, workspace_id: str, task_id: str) -> Path:
+        """
+        ~/.hiperforge/workspaces/{workspace_id}/tasks/{task_id}/
+        """
+        return self.workspace_tasks_dir(workspace_id) / task_id
+
     def task_file(self, workspace_id: str, project_id: str, task_id: str) -> Path:
         """
         ~/.hiperforge/workspaces/{workspace_id}/projects/{project_id}/tasks/{task_id}/task.json
         """
         return self.task_dir(workspace_id, project_id, task_id) / FILENAME_TASK
+
+    def workspace_task_file(self, workspace_id: str, task_id: str) -> Path:
+        """
+        ~/.hiperforge/workspaces/{workspace_id}/tasks/{task_id}/task.json
+        """
+        return self.workspace_task_dir(workspace_id, task_id) / FILENAME_TASK
 
     # ------------------------------------------------------------------
     # Métodos de utilidad
