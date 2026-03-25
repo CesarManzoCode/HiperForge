@@ -51,24 +51,31 @@ class RunTaskInput:
     Entrada para ejecutar una instrucción con el agente ReAct.
 
     Atributos:
-        prompt:       Instrucción del usuario. Requerida, no puede estar vacía.
+        prompt:       Instrucción del usuario para una task nueva.
+                      Requerida cuando task_id es None.
+        task_id:      ID de una task existente a ejecutar.
+                      Requerido cuando prompt es None.
         project_id:   Proyecto al que pertenece la task. None = task suelta.
+                      Solo aplica cuando se crea una task nueva.
         workspace_id: Workspace donde ejecutar. None = usar el activo global.
         auto_confirm: Si True, ejecuta el plan sin pedir confirmación al usuario.
                       Útil para pipelines automatizados o modo --yes de la CLI.
     """
 
-    prompt: str
+    prompt: str | None = None
+    task_id: str | None = None
     project_id: str | None = None
     workspace_id: str | None = None
     auto_confirm: bool = False
 
     def __post_init__(self) -> None:
-        # Validación en el borde — antes de llegar al dominio
-        if not self.prompt or not self.prompt.strip():
+        # `run "<prompt>"` y `task run <task_id>` son modos excluyentes.
+        has_prompt = bool(self.prompt and self.prompt.strip())
+        has_task_id = bool(self.task_id and self.task_id.strip())
+
+        if has_prompt == has_task_id:
             raise ValueError(
-                "El prompt no puede estar vacío. "
-                "Describe qué quieres que el agente haga."
+                "Debes especificar exactamente uno entre prompt o task_id."
             )
 
 
