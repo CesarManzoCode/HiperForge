@@ -1,1 +1,259 @@
-/venv
+# =============================================================================
+# HiperForge — .gitignore
+#
+# Cubre: Python, HiperForge, editores populares, OS, CI/CD y seguridad.
+# Basado en: https://github.com/github/gitignore/blob/main/Python.gitignore
+# =============================================================================
+
+
+# =============================================================================
+# SEGURIDAD — NUNCA versionar estos archivos
+# =============================================================================
+
+# Variables de entorno y API keys
+.env
+.env.*
+!.env.example          # .env.example SÍ se versiona — es solo una plantilla
+
+# Archivos de credenciales de proveedores cloud
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+
+
+# =============================================================================
+# DATOS DE HIPERFORGE — generados en runtime, no código fuente
+# =============================================================================
+
+# Directorio de datos del usuario (~/.hiperforge/)
+# Los datos de workspaces, tasks y preferencias son personales
+# y no deben estar en el repositorio.
+# NOTA: si quieres versionar datos de prueba, crea tests/fixtures/ explícitamente.
+.hiperforge/
+
+
+# =============================================================================
+# PYTHON — artefactos de compilación y distribución
+# =============================================================================
+
+# Bytecode compilado
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Distribución y packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+wheels/
+share/python-wheels/
+
+# Instalador de PyPI
+pip-wheel-metadata/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Archivos de tipo
+*.pyi
+
+
+# =============================================================================
+# TESTING Y COBERTURA
+# =============================================================================
+
+# pytest
+.pytest_cache/
+.cache/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+*.cover
+*.coveralls.json
+
+# tox
+.tox/
+.nox/
+
+
+# =============================================================================
+# LINTING Y TYPE CHECKING
+# =============================================================================
+
+# ruff
+.ruff_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pyright
+pyrightconfig.json
+
+
+# =============================================================================
+# DOCUMENTACIÓN
+# =============================================================================
+
+# MkDocs build output
+site/
+
+# Sphinx
+docs/_build/
+docs/_static/
+docs/_templates/
+
+
+# =============================================================================
+# EDITORES E IDEs
+# =============================================================================
+
+# VS Code
+.vscode/
+*.code-workspace
+!.vscode/extensions.json    # extensions.json SÍ se puede versionar (recomendaciones)
+!.vscode/settings.json      # settings.json del proyecto (no personal)
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+tags
+
+# Emacs
+*~
+\#*\#
+.\#*
+*.elc
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Spyder
+.spyproject
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+
+# =============================================================================
+# SISTEMAS OPERATIVOS
+# =============================================================================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.stackdump
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+
+# =============================================================================
+# LOGS Y TEMPORALES
+# =============================================================================
+
+# Logs generados por HiperForge y herramientas
+*.log
+logs/
+*.log.*
+
+# Archivos temporales
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Archivos de lock de pip/pip-tools
+# (descomentar si no usas pip-tools para lockfiles)
+# pip-lock.txt
+# requirements.txt
+
+
+# =============================================================================
+# CI/CD Y CONTENEDORES
+# =============================================================================
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# Archivos de profiling
+*.prof
+
+
+# =============================================================================
+# HERRAMIENTAS DE DESARROLLO
+# =============================================================================
+
+# hatch
+.hatch/
+
+# pre-commit
+.pre-commit-config.yaml.bak
+
+# Archivos de benchmarks locales
+benchmarks/results/
