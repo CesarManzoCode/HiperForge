@@ -730,7 +730,7 @@ class ExecutorService:
                 recent_tool_calls=recent_tool_calls,
                 request=request,
                 succeeded=dispatch_result.succeeded,
-                error=dispatch_result.result.error,
+                error=dispatch_result.result.error_message,
             )
 
         except ToolTimeoutError:
@@ -764,7 +764,7 @@ class ExecutorService:
                     recent_tool_calls=recent_tool_calls,
                     request=extended_request,
                     succeeded=dispatch_result.succeeded,
-                    error=dispatch_result.result.error,
+                    error=dispatch_result.result.error_message,
                 )
             except ToolTimeoutError:
                 self._remember_tool_outcome(
