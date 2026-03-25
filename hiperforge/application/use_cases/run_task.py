@@ -265,8 +265,7 @@ class RunTaskUseCase:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                if not task.is_terminal:
-                    task = task.fail()
+                task = self._fail_task_safely(session.task)
                 session.update_task(task)
                 # No repropagamos — construimos el output con el error
 
@@ -361,6 +360,26 @@ class RunTaskUseCase:
         session.update_task(task)
 
         return task
+
+    def _fail_task_safely(self, task: Task) -> Task:
+        """
+        Lleva la task a FAILED respetando las transiciones del dominio.
+
+        Una excepción durante planning deja la task en PLANNING, y desde ahí
+        no se puede ir a FAILED directamente. En ese caso pasamos por
+        IN_PROGRESS con un plan vacío antes de marcarla como fallida.
+        """
+        if task.is_terminal:
+            return task
+
+        if task.status == TaskStatus.PLANNING:
+            task = task.start_execution([])
+
+        if task.status == TaskStatus.PENDING:
+            task = task.start_planning()
+            task = task.start_execution([])
+
+        return task.fail()
 
     # ------------------------------------------------------------------
     # Resolución de workspace

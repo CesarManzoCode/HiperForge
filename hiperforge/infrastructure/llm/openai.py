@@ -126,11 +126,13 @@ class OpenAIAdapter(BaseLLMAdapter):
     def is_available(self) -> bool:
         """Verificación mínima de disponibilidad."""
         try:
-            self._client.chat.completions.create(
-                model=self._model_id,
+            kwargs = self._build_kwargs(
+                api_messages=[{"role": "user", "content": "ping"}],
                 max_tokens=1,
-                messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                stop_sequences=None,
             )
+            self._client.chat.completions.create(**kwargs)
             return True
         except Exception:
             return False
@@ -367,24 +369,24 @@ class OpenAIAdapter(BaseLLMAdapter):
           - Usa max_completion_tokens en vez de max_tokens
           - No acepta stream=True
         """
-        is_o1 = self._is_o1_model()
+        uses_max_completion_tokens = self._uses_max_completion_tokens()
 
         kwargs: dict[str, Any] = {
             "model": self._model_id,
             "messages": api_messages,
         }
 
-        # o1 usa max_completion_tokens, los demás usan max_tokens
-        if is_o1:
+        # Algunas familias nuevas de OpenAI usan max_completion_tokens.
+        if uses_max_completion_tokens:
             kwargs["max_completion_tokens"] = max_tokens
         else:
             kwargs["max_tokens"] = max_tokens
             kwargs["temperature"] = temperature
 
-        if stop_sequences and not is_o1:
+        if stop_sequences and not self._is_o1_model():
             kwargs["stop"] = stop_sequences
 
-        if stream and not is_o1:
+        if stream and not self._is_o1_model():
             kwargs["stream"] = True
             # stream_options permite recibir usage en el último chunk
             kwargs["stream_options"] = {"include_usage": True}
@@ -510,3 +512,11 @@ class OpenAIAdapter(BaseLLMAdapter):
     def _is_o1_model(self) -> bool:
         """True si el modelo activo es de la familia o1."""
         return self._model_id in _O1_MODELS
+
+    def _uses_max_completion_tokens(self) -> bool:
+        """
+        True si el modelo espera `max_completion_tokens` en vez de `max_tokens`.
+
+        OpenAI ya exige esto en familias como `o1` y `gpt-5`.
+        """
+        return self._is_o1_model() or self._model_id.startswith("gpt-5")
