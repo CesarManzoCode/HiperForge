@@ -1,34 +1,29 @@
 """
-Capa de presentación de la CLI de HiperForge.
+Capa CLI de HiperForge.
 
-Expone los componentes de UI que los comandos de la CLI necesitan
-importar directamente. Todos los componentes usan Rich internamente.
+Expone únicamente el entrypoint `app` que pyproject.toml necesita
+referenciar y la función `cli_entry` que actúa como wrapper del proceso.
 
-COMPONENTES DISPONIBLES:
-  Renderer     → motor de presentación para todos los outputs de la CLI.
-  AgentSpinner → indicador de progreso que escucha el EventBus.
-  PlanView     → vista interactiva del plan con confirmación del usuario.
-  Confirm      → diálogos de confirmación para operaciones críticas.
-  console      → consola Rich global compartida (stdout).
+El resto de los componentes de la CLI (comandos, UI, error handler) no
+se exponen aquí — la CLI es una capa de presentación interna y sus
+componentes no forman parte de la API pública del paquete.
 
-USO ESTÁNDAR EN COMANDOS:
-  from hiperforge.cli.ui import Renderer, AgentSpinner, PlanView, Confirm
+USO EN pyproject.toml:
+  [project.scripts]
+  hiperforge = "hiperforge.cli.main:cli_entry"
 
-  renderer = Renderer(verbose=verbose)
-  spinner = AgentSpinner()
-  plan_view = PlanView(renderer=renderer, auto_confirm=yes)
+USO PROGRAMÁTICO (tests de integración e2e):
+  from hiperforge.cli import app
+  from typer.testing import CliRunner
+
+  runner = CliRunner()
+  result = runner.invoke(app, ["workspace", "create", "test-ws"])
+  assert result.exit_code == 0
 """
 
-from hiperforge.cli.ui.confirm import Confirm, ConfirmResult
-from hiperforge.cli.ui.plan_view import PlanView
-from hiperforge.cli.ui.renderer import Renderer, _stdout_console as console
-from hiperforge.cli.ui.spinner import AgentSpinner
+from hiperforge.cli.main import app, cli_entry
 
 __all__ = [
-    "Renderer",
-    "AgentSpinner",
-    "PlanView",
-    "Confirm",
-    "ConfirmResult",
-    "console",
+    "app",
+    "cli_entry",
 ]
