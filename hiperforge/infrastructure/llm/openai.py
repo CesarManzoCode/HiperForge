@@ -383,7 +383,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             kwargs["max_tokens"] = max_tokens
             kwargs["temperature"] = temperature
 
-        if stop_sequences and not self._is_o1_model():
+        if stop_sequences and self._supports_stop_sequences():
             kwargs["stop"] = stop_sequences
 
         if stream and not self._is_o1_model():
@@ -520,3 +520,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         OpenAI ya exige esto en familias como `o1` y `gpt-5`.
         """
         return self._is_o1_model() or self._model_id.startswith("gpt-5")
+
+    def _supports_stop_sequences(self) -> bool:
+        """True si el modelo acepta el parámetro `stop`."""
+        return not self._is_o1_model() and not self._model_id.startswith("gpt-5")
