@@ -262,15 +262,10 @@ patterns = [
 [tool.hatch.build.targets.sdist]
 # Source distribution incluye todo menos artefactos de build y cache
 exclude = [
-    "/.github",
+    ""tests,
+    "/scripts",
     "/.venv",
-    "/venv",
-    "/__pycache__",
-    "/.mypy_cache",
-    "/.ruff_cache",
-    "/.pytest_cache",
-    "*.pyc",
-    "*.pyo",
+    "/__pycache__"
 ]
 
 
