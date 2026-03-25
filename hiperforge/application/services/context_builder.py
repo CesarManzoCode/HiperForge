@@ -93,13 +93,13 @@ DEBES responder SIEMPRE con exactamente uno de estos tres formatos JSON.
 NO incluyas texto antes ni después del JSON. SOLO el JSON.
 
 1. EJECUTAR UNA HERRAMIENTA:
-{"action": "tool_call", "tool": "<nombre_herramienta>", "arguments": {<argumentos>}}
+{{"action": "tool_call", "tool": "<nombre_herramienta>", "arguments": {{<argumentos>}}}}
 
 2. RAZONAR SIN ACTUAR (cuando necesitas pensar antes de actuar):
-{"action": "think", "content": "<tu razonamiento>"}
+{{"action": "think", "content": "<tu razonamiento>"}}
 
 3. INDICAR QUE LA SUBTASK ESTÁ COMPLETA:
-{"action": "complete", "summary": "<qué lograste y cómo lo verificaste>"}
+{{"action": "complete", "summary": "<qué lograste y cómo lo verificaste>"}}
 
 ════════════════════════════════════════════════════════════
 REGLAS DE COMPORTAMIENTO
