@@ -116,6 +116,69 @@ class RunTaskOutput:
 
 
 # ---------------------------------------------------------------------------
+# Create Task / Task Summary
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CreateTaskInput:
+    """
+    Entrada para crear una task en estado PENDING sin ejecutarla.
+
+    Atributos:
+        prompt:       Instrucción del usuario. Requerida, no puede estar vacía.
+        project_id:   Proyecto al que pertenecerá la task. None = task suelta.
+        workspace_id: Workspace donde crear la task. None = usar el activo.
+    """
+
+    prompt: str
+    project_id: str | None = None
+    workspace_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.prompt or not self.prompt.strip():
+            raise ValueError(
+                "El prompt no puede estar vacío. "
+                "Describe qué quieres que la task haga."
+            )
+
+
+@dataclass(frozen=True)
+class TaskSummary:
+    """
+    Resumen de una task para listados y confirmaciones de la CLI.
+
+    Contiene el mínimo de datos que la capa de presentación necesita
+    para mostrar estado, progreso, costo y contexto.
+    """
+
+    id: str
+    prompt: str
+    status: str
+    project_id: str | None
+    subtask_count: int
+    completed_subtasks: int
+    total_tokens: int
+    estimated_cost_usd: float
+    created_at: datetime
+    completed_at: datetime | None = None
+
+    @property
+    def prompt_preview(self) -> str:
+        """Versión corta del prompt para tablas y paneles."""
+        trimmed = self.prompt.strip()
+        if len(trimmed) <= 80:
+            return trimmed
+        return trimmed[:77] + "..."
+
+    @property
+    def progress_pct(self) -> float:
+        """Porcentaje de subtasks completadas. 0.0 si no hay subtasks."""
+        if self.subtask_count == 0:
+            return 0.0
+        return round((self.completed_subtasks / self.subtask_count) * 100, 1)
+
+
+# ---------------------------------------------------------------------------
 # Create Project
 # ---------------------------------------------------------------------------
 
