@@ -176,7 +176,6 @@ app.command(
         "[bold]Ejemplo:[/bold]\n\n"
         "  [cyan]hiperforge run \"agrega tests al módulo auth\"[/cyan]"
     ),
-    rich_markup_mode="rich",
 )(run_command)
 
 
