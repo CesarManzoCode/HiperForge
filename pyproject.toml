@@ -245,10 +245,8 @@ Changelog      = "https://github.com/hiperforge/hiperforge/blob/main/CHANGELOG.m
 # Hatchling lo detecta automáticamente por la presencia de hiperforge/__init__.py.
 # Solo incluimos el código fuente Python — sin datos de test ni scripts.
 packages = ["hiperforge"]
-
-[tool.hatch.build.targets.wheel.exclude]
 # Excluimos archivos innecesarios del wheel de distribución
-patterns = [
+exclude = [
     "**/__pycache__",
     "**/*.pyc",
     "**/*.pyo",
