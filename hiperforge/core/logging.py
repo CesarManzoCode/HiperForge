@@ -143,7 +143,9 @@ def setup_logging(
             getattr(logging, log_level)
         ),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        # Usamos stdlib.LoggerFactory porque los processors compartidos
+        # (como add_logger_name) esperan un logger con atributos estándar.
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
