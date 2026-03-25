@@ -91,6 +91,7 @@ LLM_DEFAULT_TEMPERATURE = 0.2
 LLM_DEFAULT_MAX_TOKENS = 4096
 LLM_DEFAULT_MAX_TOKENS_PLANNING = 2048   # el plan no necesita respuestas largas
 LLM_DEFAULT_MAX_TOKENS_SUMMARY = 1024    # el resumen final tampoco
+LLM_DEFAULT_MAX_TOKENS_REACT = 1536      # cada iteración ReAct debe ser corta
 
 # Tamaño del context window por defecto (para modelos desconocidos)
 LLM_DEFAULT_CONTEXT_WINDOW = 8_192

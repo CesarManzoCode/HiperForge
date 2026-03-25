@@ -80,6 +80,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from hiperforge.core.constants import (
+    LLM_DEFAULT_MAX_TOKENS_REACT,
     REACT_MAX_ITERATIONS_PER_SUBTASK,
     REACT_MAX_TOOL_RETRIES,
     REACT_RETRY_DELAY_SECONDS,
@@ -112,7 +113,7 @@ _STALL_THRESHOLD = 4
 
 # Mensaje de intervención cuando el agente está atascado
 _STALL_INTERVENTION_MSG = """\
-{"action": "think", "content": "ATENCIÓN: He intentado la misma acción varias veces sin éxito. Necesito cambiar de estrategia. Analizaré el error con más cuidado y probaré un enfoque diferente."}"""
+{"action": "think", "content": "ATENCION: estoy en un bucle. Debo cambiar de estrategia ahora. No debo repetir la misma tool con el mismo objetivo si ya fallo. Si una ruta es un directorio, usare list/shell en vez de read. Si acabo de escribir un archivo, no debo releerlo completo salvo que sea imprescindible. Mi siguiente respuesta debe ser una sola accion util y distinta."}"""
 
 
 # ---------------------------------------------------------------------------
@@ -718,13 +719,6 @@ class ExecutorService:
             },
         )
 
-        # Registrar para detección de bucles
-        # Usamos "tool_name:arg_signature" como fingerprint
-        call_fingerprint = f"{request.tool_name}:{self._arg_fingerprint(request.arguments)}"
-        recent_tool_calls.append(call_fingerprint)
-        if len(recent_tool_calls) > _LOOP_DETECTION_WINDOW * 2:
-            recent_tool_calls.pop(0)
-
         try:
             dispatch_result, formatted_message = self._dispatcher.dispatch_and_format_for_llm(
                 request=request,
@@ -732,8 +726,20 @@ class ExecutorService:
                 subtask_id=subtask.id,
                 format_result_fn=self._llm.format_tool_result,
             )
+            self._remember_tool_outcome(
+                recent_tool_calls=recent_tool_calls,
+                request=request,
+                succeeded=dispatch_result.succeeded,
+                error=dispatch_result.result.error,
+            )
 
         except ToolTimeoutError:
+            self._remember_tool_outcome(
+                recent_tool_calls=recent_tool_calls,
+                request=request,
+                succeeded=False,
+                error="timeout",
+            )
             # Reintento automático con extended_timeout
             log.warning(
                 "timeout en tool — reintentando con extended_timeout",
@@ -754,7 +760,19 @@ class ExecutorService:
                     subtask_id=subtask.id,
                     format_result_fn=self._llm.format_tool_result,
                 )
+                self._remember_tool_outcome(
+                    recent_tool_calls=recent_tool_calls,
+                    request=extended_request,
+                    succeeded=dispatch_result.succeeded,
+                    error=dispatch_result.result.error,
+                )
             except ToolTimeoutError:
+                self._remember_tool_outcome(
+                    recent_tool_calls=recent_tool_calls,
+                    request=extended_request,
+                    succeeded=False,
+                    error="extended-timeout",
+                )
                 # Timeout incluso con extended — falla la subtask
                 log.error(
                     "timeout persistente tras extended_timeout — fallando subtask",
@@ -808,16 +826,20 @@ class ExecutorService:
         lo que hace que el executor falle la subtask activa.
         """
         # Truncar historial si se acerca al context window
+        react_max_tokens = min(
+            self._settings.llm_max_tokens,
+            LLM_DEFAULT_MAX_TOKENS_REACT,
+        )
         messages = self._context_builder.truncate_messages_for_context_window(
             messages=session.get_messages(),
             context_window_size=self._llm.get_context_window_size(),
-            max_tokens_response=self._settings.llm_max_tokens,
+            max_tokens_response=react_max_tokens,
         )
 
         try:
             return self._llm.complete(
                 messages=messages,
-                max_tokens=self._settings.llm_max_tokens,
+                max_tokens=react_max_tokens,
                 temperature=self._settings.llm_temperature,
             )
         except Exception as exc:
@@ -921,7 +943,20 @@ class ExecutorService:
 
         # Tomamos las últimas N calls y verificamos si son todas iguales
         last_n = recent_tool_calls[-_LOOP_DETECTION_WINDOW:]
-        return len(set(last_n)) == 1  # todas iguales = bucle
+        if len(set(last_n)) == 1:
+            return True
+
+        # También consideramos bucle cuando las últimas N acciones
+        # son fallos de la misma tool, aunque cambien detalles menores.
+        failure_families = [
+            item.split("|", 2)[1]
+            for item in last_n
+            if item.startswith("fail|") and "|" in item
+        ]
+        return (
+            len(failure_families) == _LOOP_DETECTION_WINDOW
+            and len(set(failure_families)) == 1
+        )
 
     def _inject_loop_intervention(self, session: InMemorySession) -> None:
         """
@@ -933,6 +968,24 @@ class ExecutorService:
         session.push_message(
             Message.user(_STALL_INTERVENTION_MSG)
         )
+
+    def _remember_tool_outcome(
+        self,
+        recent_tool_calls: list[str],
+        request: ToolCallRequest,
+        succeeded: bool,
+        error: str | None,
+    ) -> None:
+        """Guarda una fingerprint compacta del resultado de una tool call."""
+        base = f"{request.tool_name}:{self._arg_fingerprint(request.arguments)}"
+        if succeeded:
+            fingerprint = f"ok|{base}"
+        else:
+            fingerprint = f"fail|{request.tool_name}|{self._error_fingerprint(error)}|{base}"
+
+        recent_tool_calls.append(fingerprint)
+        if len(recent_tool_calls) > _LOOP_DETECTION_WINDOW * 3:
+            recent_tool_calls.pop(0)
 
     # ------------------------------------------------------------------
     # Inicialización de la sesión por subtask
@@ -1101,14 +1154,49 @@ class ExecutorService:
         No necesita ser 100% único — solo suficientemente distintivo
         para detectar cuando el agente repite exactamente los mismos argumentos.
         """
+        def normalize(value: Any, key: str | None = None) -> Any:
+            if isinstance(value, dict):
+                return {
+                    str(k): normalize(v, str(k))
+                    for k, v in sorted(value.items())
+                    if str(k) not in {"content", "patch"}
+                }
+            if isinstance(value, list):
+                return [normalize(v) for v in value[:6]]
+            if isinstance(value, str):
+                text = value.strip()
+                if key in {"path", "working_dir"}:
+                    return os.path.basename(text.rstrip("/")) or text[-24:]
+                if key == "command":
+                    return text[:48]
+                return text[:32]
+            return value
+
         try:
             # Serialización ordenada para que el mismo dict siempre
             # produzca el mismo fingerprint
-            serialized = json.dumps(arguments, sort_keys=True)
+            serialized = json.dumps(normalize(arguments), sort_keys=True)
             # Tomamos solo los primeros 64 chars para mantenerlo corto
             return serialized[:64]
         except (TypeError, ValueError):
             return str(arguments)[:64]
+
+    @staticmethod
+    def _error_fingerprint(error: str | None) -> str:
+        """Reduce errores de tool a familias cortas para detectar repeticiones."""
+        if not error:
+            return "unknown"
+
+        normalized = error.lower()
+        if "no es un archivo" in normalized:
+            return "path-not-file"
+        if "operación" in normalized and "inválida" in normalized:
+            return "invalid-operation"
+        if "timeout" in normalized:
+            return "timeout"
+        if "exit code" in normalized:
+            return "command-failed"
+        return normalized[:32]
 
     @staticmethod
     def _task_duration(task: Task) -> float:
