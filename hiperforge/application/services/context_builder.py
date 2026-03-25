@@ -82,69 +82,36 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT_BASE = """\
-Eres HiperForge, un agente autónomo de desarrollo de software.
-Tu función es completar tareas de desarrollo usando las herramientas disponibles.
+Eres HiperForge, un agente autónomo de desarrollo.
+Completa la subtask con las herramientas disponibles y responde SOLO JSON.
 
-════════════════════════════════════════════════════════════
-PROTOCOLO DE COMUNICACIÓN OBLIGATORIO
-════════════════════════════════════════════════════════════
+PROTOCOLO:
+1. Tool:
+{{"action":"tool_call","tool":"<nombre>","arguments":{{<args>}}}}
+2. Think:
+{{"action":"think","content":"<razonamiento breve>"}}
+3. Complete:
+{{"action":"complete","summary":"<qué hiciste y cómo lo verificaste>"}}
 
-DEBES responder SIEMPRE con exactamente uno de estos tres formatos JSON.
-NO incluyas texto antes ni después del JSON. SOLO el JSON.
-
-1. EJECUTAR UNA HERRAMIENTA:
-{{"action": "tool_call", "tool": "<nombre_herramienta>", "arguments": {{<argumentos>}}}}
-
-2. RAZONAR SIN ACTUAR (cuando necesitas pensar antes de actuar):
-{{"action": "think", "content": "<tu razonamiento>"}}
-
-3. INDICAR QUE LA SUBTASK ESTÁ COMPLETA:
-{{"action": "complete", "summary": "<qué lograste y cómo lo verificaste>"}}
-
-════════════════════════════════════════════════════════════
-REGLAS DE COMPORTAMIENTO
-════════════════════════════════════════════════════════════
-
-RAZONAMIENTO:
-  - Usa "think" para analizar el contexto antes de actuar.
-  - Piensa antes de cada acción, especialmente si algo falló.
-  - No asumir — verifica con herramientas antes de concluir.
-
-EJECUCIÓN:
-  - Usa la herramienta más específica para cada tarea.
-  - Si un comando falla, lee el error completo y ajusta la estrategia.
-  - No repitas exactamente el mismo comando que ya falló sin cambios.
-
-COMPLETACIÓN:
-  - Usa "complete" SOLO cuando hayas verificado que la subtask terminó.
-  - El summary debe describir exactamente qué hiciste y cómo lo verificaste.
-  - No uses "complete" si hay pasos pendientes o errores sin resolver.
-
-ERRORES:
-  - Errores son información — léelos completamente antes de reaccionar.
-  - Intenta hasta {max_retries} estrategias diferentes antes de rendirte.
-  - Si no puedes completar la subtask, usa "complete" explicando el bloqueo.
+REGLAS:
+- Usa la herramienta más específica posible.
+- No repitas la misma acción fallida sin cambiar algo.
+- Lee errores completos antes de reintentar.
+- Usa "complete" solo si verificaste el resultado o si explicas claramente el bloqueo.
+- Intenta como máximo {max_retries} estrategias distintas.
 """
 
 # Plantilla para la sección de tools disponibles
-_TOOLS_SECTION_HEADER = """\
-════════════════════════════════════════════════════════════
-HERRAMIENTAS DISPONIBLES
-════════════════════════════════════════════════════════════
-"""
+_TOOLS_SECTION_HEADER = "HERRAMIENTAS:"
 
 # Plantilla para el contexto de la subtask actual
 _SUBTASK_CONTEXT_TEMPLATE = """\
-════════════════════════════════════════════════════════════
-CONTEXTO DE EJECUCIÓN ACTUAL
-════════════════════════════════════════════════════════════
-Tarea del usuario : {task_prompt}
-Subtask actual    : {subtask_description}
-Directorio        : {working_dir}
-════════════════════════════════════════════════════════════
+CONTEXTO:
+- Tarea: {task_prompt}
+- Subtask: {subtask_description}
+- Directorio: {working_dir}
 
-Completa la subtask usando las herramientas disponibles.
-Responde SOLO con JSON válido siguiendo el protocolo de arriba.\
+Completa la subtask y responde SOLO con JSON válido.\
 """
 
 
@@ -197,6 +164,8 @@ class ContextBuilder:
             Message con role=SYSTEM listo para incluir en el historial.
         """
         effective_dir = working_dir or os.getcwd()
+        compact_task_prompt = task_prompt.strip()[:240]
+        compact_subtask_description = subtask_description.strip()[:280]
 
         sections: list[str] = []
 
@@ -213,8 +182,8 @@ class ContextBuilder:
         # Sección 3: contexto de la subtask actual
         sections.append(
             _SUBTASK_CONTEXT_TEMPLATE.format(
-                task_prompt=task_prompt,
-                subtask_description=subtask_description,
+                task_prompt=compact_task_prompt,
+                subtask_description=compact_subtask_description,
                 working_dir=effective_dir,
             )
         )
@@ -249,46 +218,22 @@ class ContextBuilder:
 
         for schema in schemas:
             # Encabezado de la tool
-            lines.append(f'  "{schema.name}"')
-            lines.append(f"  Uso: {schema.description}")
+            lines.append(f'- {schema.name}: {schema.description.split(".")[0].strip()[:72]}')
 
             # Parámetros
             props: dict[str, Any] = schema.parameters.get("properties", {})
             required: list[str] = schema.parameters.get("required", [])
 
             if props:
-                lines.append("  Parámetros:")
+                lines.append("  Params:")
                 for param_name, param_info in props.items():
-                    is_req = " (REQUERIDO)" if param_name in required else " (opcional)"
+                    is_req = "*" if param_name in required else ""
                     param_type = param_info.get("type", "any")
-                    # Truncamos la descripción para no inflar el prompt
                     param_desc = param_info.get("description", "")
-                    # Tomamos solo la primera línea de la descripción
-                    first_line = param_desc.split("\n")[0].strip()[:100]
+                    first_line = param_desc.split("\n")[0].strip()[:48]
                     lines.append(
-                        f"    {param_name} ({param_type}){is_req}: {first_line}"
+                        f"    - {param_name}{is_req} ({param_type}): {first_line}"
                     )
-
-            lines.append("")  # línea en blanco entre tools
-
-        # Ejemplos de uso para reforzar el protocolo JSON
-        lines.append("EJEMPLOS DE USO CORRECTO:")
-        lines.append(
-            '  {"action": "tool_call", "tool": "shell", '
-            '"arguments": {"command": "pytest tests/ -v"}}'
-        )
-        lines.append(
-            '  {"action": "tool_call", "tool": "file", '
-            '"arguments": {"operation": "read", "path": "src/main.py"}}'
-        )
-        lines.append(
-            '  {"action": "tool_call", "tool": "code", '
-            '"arguments": {"operation": "find_symbol", "symbol": "authenticate"}}'
-        )
-        lines.append(
-            '  {"action": "tool_call", "tool": "git", '
-            '"arguments": {"operation": "status"}}'
-        )
 
         return "\n".join(lines)
 

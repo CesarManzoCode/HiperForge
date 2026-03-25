@@ -101,6 +101,11 @@ LLM_DEFAULT_CONTEXT_WINDOW = 8_192
 # context_builder.py trunca los mensajes más antiguos.
 LLM_CONTEXT_RESPONSE_RESERVE = 1_024
 
+# Límite del payload de resultado de tool que se reinyecta al LLM.
+# Debe ser bastante más pequeño que TOOL_MAX_OUTPUT_CHARS para evitar
+# que el loop ReAct reenvíe miles de caracteres en cada iteración.
+LLM_TOOL_RESULT_MAX_CHARS = 1_200
+
 
 # ---------------------------------------------------------------------------
 # Configuración del loop ReAct
@@ -135,7 +140,7 @@ TOOL_EXTENDED_TIMEOUT_SECONDS = 120.0
 
 # Tamaño máximo de output de una tool que se envía al LLM (caracteres).
 # Outputs más largos se truncan para no desperdiciar tokens.
-TOOL_MAX_OUTPUT_CHARS = 8_000
+TOOL_MAX_OUTPUT_CHARS = 3_000
 
 # Tamaño máximo de un archivo que FileTool puede leer completo (bytes).
 # Archivos más grandes se leen en chunks o se resume su contenido.

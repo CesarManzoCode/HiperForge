@@ -48,6 +48,7 @@ from hiperforge.core.constants import (
     LLM_CONTEXT_RESPONSE_RESERVE,
     LLM_DEFAULT_MAX_TOKENS,
     LLM_DEFAULT_TEMPERATURE,
+    LLM_TOOL_RESULT_MAX_CHARS,
 )
 from hiperforge.core.events import AgentEvent, EventType, get_event_bus
 from hiperforge.core.logging import get_logger
@@ -489,6 +490,28 @@ class BaseLLMAdapter(LLMPort):
             subtask_id=subtask_id,
             provider=self.get_provider_name(),
             model=self.get_model_id(),
+        )
+
+    def _compress_tool_output_for_llm(self, output: str) -> str:
+        """
+        Compacta el output de una tool antes de reinyectarlo al LLM.
+
+        Objetivo: preservar señal útil con un costo de tokens mucho menor.
+        Si el output es largo, conservamos inicio y final con metadata básica.
+        """
+        normalized = output.strip()
+        if len(normalized) <= LLM_TOOL_RESULT_MAX_CHARS:
+            return normalized
+
+        head_chars = int(LLM_TOOL_RESULT_MAX_CHARS * 0.65)
+        tail_chars = LLM_TOOL_RESULT_MAX_CHARS - head_chars
+        line_count = normalized.count("\n") + 1
+
+        return (
+            f"[tool_output_summary chars={len(normalized)} lines={line_count} "
+            f"truncated=true]\n"
+            f"[head]\n{normalized[:head_chars].rstrip()}\n[/head]\n"
+            f"[tail]\n{normalized[-tail_chars:].lstrip()}\n[/tail]"
         )
 
     # ------------------------------------------------------------------

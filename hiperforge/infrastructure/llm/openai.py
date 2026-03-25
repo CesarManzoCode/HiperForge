@@ -311,7 +311,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "success": success,
-            "output": output,
+            "output": self._compress_tool_output_for_llm(output),
         }
         return Message.user(json.dumps(result_payload, ensure_ascii=False))
 
