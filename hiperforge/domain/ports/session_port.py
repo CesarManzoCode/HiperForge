@@ -71,6 +71,8 @@ class EventType(str, Enum):
     """
 
     # Ciclo de vida de la task
+    SESSION_STARTED = "session_started"
+    SESSION_ENDED = "session_ended"
     TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
