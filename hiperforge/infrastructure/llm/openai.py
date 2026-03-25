@@ -440,7 +440,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             return [], content, "stop"
 
         try:
-            parsed = json.loads(stripped)
+            parsed, end_index = json.JSONDecoder().raw_decode(stripped)
         except json.JSONDecodeError:
             logger.warning(
                 "LLM devolvió JSON malformado, tratando como texto",
@@ -448,6 +448,19 @@ class OpenAIAdapter(BaseLLMAdapter):
                 provider=self.get_provider_name(),
                 task_id=self._task_id,
             )
+            return [], content, "stop"
+
+        trailing_content = stripped[end_index:].strip()
+        if trailing_content:
+            logger.warning(
+                "LLM devolvió múltiples bloques JSON; usando el primero",
+                content_preview=stripped[:200],
+                trailing_preview=trailing_content[:120],
+                provider=self.get_provider_name(),
+                task_id=self._task_id,
+            )
+
+        if not isinstance(parsed, dict):
             return [], content, "stop"
 
         action = parsed.get(_ACTION_FIELD, "")
