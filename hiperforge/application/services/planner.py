@@ -102,7 +102,7 @@ _MIN_SUBTASK_DESCRIPTION_LENGTH = 10
 
 # Máximo de caracteres para una descripción de subtask
 # Descripciones muy largas confunden al executor
-_MAX_SUBTASK_DESCRIPTION_LENGTH = 300
+_MAX_SUBTASK_DESCRIPTION_LENGTH = 240
 
 # Palabras que indican subtasks vagas que el agente no puede ejecutar
 _VAGUE_INDICATORS: frozenset[str] = frozenset({
@@ -186,14 +186,17 @@ FORMATO DE RESPUESTA OBLIGATORIO — responde SOLO con este JSON, sin texto adic
 REGLAS PARA SUBTASKS DE CALIDAD:
   ✓ Cada subtask debe ser un paso concreto que el agente puede ejecutar con herramientas.
   ✓ La descripción debe indicar QUÉ hacer y CÓMO verificarlo.
+  ✓ Mantén cada descripción entre 60 y 220 caracteres si es posible.
   ✓ Máximo {max_subtasks} subtasks. Agrupa pasos pequeños si es necesario.
   ✓ Ordena las subtasks en la secuencia lógica de ejecución.
   ✓ Cada subtask debe poder verificarse — el agente confirmará su completación.
+  ✓ Si el usuario no pidió documentación, README o limpieza extra, no la agregues al plan.
 
   ✗ No incluyas pasos vagos: "asegurarse de que funciona", "revisar todo".
   ✗ No incluyas pasos de configuración del entorno que ya deberían estar listos.
   ✗ No repitas la misma acción en múltiples subtasks.
   ✗ No incluyas más de una responsabilidad diferente por subtask.
+  ✗ No metas trabajo accesorio "por si acaso" como README, refactors amplios o tests no solicitados.
 
 EJEMPLOS DE SUBTASKS BUENAS vs MALAS:
 

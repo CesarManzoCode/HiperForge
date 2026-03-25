@@ -108,12 +108,18 @@ logger = get_logger(__name__)
 # Cuántas tool calls recientes comparar para detectar bucles
 _LOOP_DETECTION_WINDOW = 3
 
+# Ventana para detectar exploración o verificación redundante
+_EFFICIENCY_WINDOW = 4
+
 # Después de cuántas iteraciones sin progreso inyectar una intervención
 _STALL_THRESHOLD = 4
 
 # Mensaje de intervención cuando el agente está atascado
 _STALL_INTERVENTION_MSG = """\
 {"action": "think", "content": "ATENCION: estoy en un bucle. Debo cambiar de estrategia ahora. No debo repetir la misma tool con el mismo objetivo si ya fallo. Si una ruta es un directorio, usare list/shell en vez de read. Si acabo de escribir un archivo, no debo releerlo completo salvo que sea imprescindible. Mi siguiente respuesta debe ser una sola accion util y distinta."}"""
+
+_EFFICIENCY_INTERVENTION_MSG = """\
+{"action": "think", "content": "Ya tengo evidencia suficiente o estoy reverificando de forma redundante. No debo volver a listar, releer o ejecutar la misma verificacion si ya paso. Si el resultado ya fue comprobado al menos una vez, ahora debo responder con action=complete. Solo usare otra tool si aporta evidencia NUEVA."}"""
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +150,18 @@ class IterationResult:
     task: Task              # task actualizada con tokens y subtask
     should_continue: bool   # True = continuar el loop, False = salir
     action_type: str        # "think", "tool_call", "complete", "text", "error"
+
+
+@dataclass(frozen=True)
+class ToolOutcomeSnapshot:
+    """Resumen semántico de una tool call reciente para detectar patrones."""
+    fingerprint: str
+    family: str
+    success: bool
+    tool_name: str
+    is_mutation: bool
+    is_observation: bool
+    is_verification: bool
 
 
 @dataclass
@@ -389,7 +407,7 @@ class ExecutorService:
         # Estado interno del loop
         iteration = 0
         loop_detections = 0
-        recent_tool_calls: list[str] = []  # para detección de bucles
+        recent_tool_outcomes: list[ToolOutcomeSnapshot] = []
 
         # ──────────────────────────────────────────────────────────────
         # LOOP REACT
@@ -413,15 +431,29 @@ class ExecutorService:
             )
 
             # Detectar si el agente está atascado en un bucle
-            if self._is_stuck_in_loop(recent_tool_calls):
+            if self._is_stuck_in_loop(recent_tool_outcomes):
                 log.warning(
                     "bucle detectado — inyectando intervención",
                     iteration=iteration,
-                    recent_calls=recent_tool_calls[-_LOOP_DETECTION_WINDOW:],
+                    recent_calls=[
+                        item.fingerprint
+                        for item in recent_tool_outcomes[-_LOOP_DETECTION_WINDOW:]
+                    ],
                 )
                 self._inject_loop_intervention(session)
                 loop_detections += 1
-                recent_tool_calls.clear()
+                recent_tool_outcomes.clear()
+            elif self._is_wasting_iterations(recent_tool_outcomes):
+                log.warning(
+                    "exploración/reverificación redundante detectada",
+                    iteration=iteration,
+                    recent_calls=[
+                        item.fingerprint
+                        for item in recent_tool_outcomes[-_EFFICIENCY_WINDOW:]
+                    ],
+                )
+                self._inject_efficiency_intervention(session)
+                loop_detections += 1
 
             # Llamar al LLM con el historial actual
             response = self._call_llm_safe(session=session, task=task)
@@ -454,7 +486,7 @@ class ExecutorService:
                 subtask=subtask,
                 session=session,
                 iteration=iteration,
-                recent_tool_calls=recent_tool_calls,
+                recent_tool_outcomes=recent_tool_outcomes,
                 log=log,
             )
 
@@ -522,7 +554,7 @@ class ExecutorService:
         subtask: Subtask,
         session: InMemorySession,
         iteration: int,
-        recent_tool_calls: list[str],
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
         log: Any,
     ) -> IterationResult:
         """
@@ -541,17 +573,12 @@ class ExecutorService:
                 summary_preview=response.content[:100],
             )
 
-            subtask = subtask.update_reasoning(response.content)
-            subtask = subtask.complete()
-            task = task.update_subtask(subtask)
-
-            session.push_message(Message.assistant(response.content))
-            session.record_event(
-                SessionEventType.SUBTASK_COMPLETED,
-                {
-                    "iteration": iteration,
-                    "summary_preview": response.content[:200],
-                },
+            subtask, task = self._complete_subtask(
+                task=task,
+                subtask=subtask,
+                session=session,
+                summary=response.content,
+                iteration=iteration,
             )
 
             return IterationResult(
@@ -563,12 +590,12 @@ class ExecutorService:
 
         # ── CASE 2: El agente solicita ejecutar una tool ───────────────
         if response.has_tool_calls:
-            subtask, task = self._execute_tool_calls(
+            subtask, task, all_succeeded = self._execute_tool_calls(
                 tool_requests=response.tool_calls,
                 task=task,
                 subtask=subtask,
                 session=session,
-                recent_tool_calls=recent_tool_calls,
+                recent_tool_outcomes=recent_tool_outcomes,
                 iteration=iteration,
                 log=log,
             )
@@ -580,6 +607,21 @@ class ExecutorService:
                     task=task,
                     should_continue=False,
                     action_type="tool_call",
+                )
+
+            if all_succeeded and response.deferred_completion_summary:
+                completed = self._complete_subtask(
+                    task=task,
+                    subtask=subtask,
+                    session=session,
+                    summary=response.deferred_completion_summary,
+                    iteration=iteration,
+                )
+                return IterationResult(
+                    subtask=completed[0],
+                    task=completed[1],
+                    should_continue=False,
+                    action_type="complete",
                 )
 
             return IterationResult(
@@ -651,10 +693,10 @@ class ExecutorService:
         task: Task,
         subtask: Subtask,
         session: InMemorySession,
-        recent_tool_calls: list[str],
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
         iteration: int,
         log: Any,
-    ) -> tuple[Subtask, Task]:
+    ) -> tuple[Subtask, Task, bool]:
         """
         Ejecuta todas las tool calls solicitadas en esta iteración.
 
@@ -663,22 +705,25 @@ class ExecutorService:
 
         Maneja reintentos ante timeout automáticamente.
         """
+        all_succeeded = True
+
         for request in tool_requests:
-            subtask, task = self._execute_single_tool_call(
+            subtask, task, succeeded = self._execute_single_tool_call(
                 request=request,
                 task=task,
                 subtask=subtask,
                 session=session,
-                recent_tool_calls=recent_tool_calls,
+                recent_tool_outcomes=recent_tool_outcomes,
                 iteration=iteration,
                 log=log,
             )
+            all_succeeded = all_succeeded and succeeded
 
             # Si la subtask falló durante esta tool, no ejecutamos las siguientes
             if subtask.status == SubtaskStatus.FAILED:
                 break
 
-        return subtask, task
+        return subtask, task, all_succeeded
 
     def _execute_single_tool_call(
         self,
@@ -686,10 +731,10 @@ class ExecutorService:
         task: Task,
         subtask: Subtask,
         session: InMemorySession,
-        recent_tool_calls: list[str],
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
         iteration: int,
         log: Any,
-    ) -> tuple[Subtask, Task]:
+    ) -> tuple[Subtask, Task, bool]:
         """
         Ejecuta una sola tool call con manejo de timeout inteligente.
 
@@ -727,7 +772,7 @@ class ExecutorService:
                 format_result_fn=self._llm.format_tool_result,
             )
             self._remember_tool_outcome(
-                recent_tool_calls=recent_tool_calls,
+                recent_tool_outcomes=recent_tool_outcomes,
                 request=request,
                 succeeded=dispatch_result.succeeded,
                 error=dispatch_result.result.error_message,
@@ -735,7 +780,7 @@ class ExecutorService:
 
         except ToolTimeoutError:
             self._remember_tool_outcome(
-                recent_tool_calls=recent_tool_calls,
+                recent_tool_outcomes=recent_tool_outcomes,
                 request=request,
                 succeeded=False,
                 error="timeout",
@@ -761,14 +806,14 @@ class ExecutorService:
                     format_result_fn=self._llm.format_tool_result,
                 )
                 self._remember_tool_outcome(
-                    recent_tool_calls=recent_tool_calls,
+                    recent_tool_outcomes=recent_tool_outcomes,
                     request=extended_request,
                     succeeded=dispatch_result.succeeded,
                     error=dispatch_result.result.error_message,
                 )
             except ToolTimeoutError:
                 self._remember_tool_outcome(
-                    recent_tool_calls=recent_tool_calls,
+                    recent_tool_outcomes=recent_tool_outcomes,
                     request=extended_request,
                     succeeded=False,
                     error="extended-timeout",
@@ -780,7 +825,7 @@ class ExecutorService:
                 )
                 subtask = subtask.fail()
                 task = task.update_subtask(subtask)
-                return subtask, task
+                return subtask, task, False
 
         # Registrar el tool call completado en la subtask
         subtask = subtask.add_tool_call(dispatch_result.tool_call)
@@ -807,7 +852,31 @@ class ExecutorService:
             duration_seconds=dispatch_result.duration_seconds,
         )
 
-        return subtask, task
+        return subtask, task, dispatch_result.succeeded
+
+    def _complete_subtask(
+        self,
+        task: Task,
+        subtask: Subtask,
+        session: InMemorySession,
+        summary: str,
+        iteration: int,
+    ) -> tuple[Subtask, Task]:
+        """Marca la subtask como completada y registra el resumen final."""
+        completed_subtask = subtask.update_reasoning(summary)
+        completed_subtask = completed_subtask.complete()
+        updated_task = task.update_subtask(completed_subtask)
+
+        session.push_message(Message.assistant(summary))
+        session.record_event(
+            SessionEventType.SUBTASK_COMPLETED,
+            {
+                "iteration": iteration,
+                "summary_preview": summary[:200],
+            },
+        )
+
+        return completed_subtask, updated_task
 
     # ------------------------------------------------------------------
     # Llamada al LLM con manejo de errores
@@ -924,7 +993,7 @@ class ExecutorService:
     # Detección de bucles
     # ------------------------------------------------------------------
 
-    def _is_stuck_in_loop(self, recent_tool_calls: list[str]) -> bool:
+    def _is_stuck_in_loop(self, recent_tool_outcomes: list[ToolOutcomeSnapshot]) -> bool:
         """
         Detecta si el agente está repitiendo las mismas tool calls.
 
@@ -933,29 +1002,68 @@ class ExecutorService:
         aprendiendo del error y necesita ser redirigido.
 
         Parámetros:
-            recent_tool_calls: Lista de fingerprints de las últimas tool calls.
+            recent_tool_outcomes: Lista de resultados recientes de tools.
 
         Returns:
             True si se detecta un bucle, False si el agente progresa.
         """
-        if len(recent_tool_calls) < _LOOP_DETECTION_WINDOW:
+        if len(recent_tool_outcomes) < _LOOP_DETECTION_WINDOW:
             return False
 
-        # Tomamos las últimas N calls y verificamos si son todas iguales
-        last_n = recent_tool_calls[-_LOOP_DETECTION_WINDOW:]
-        if len(set(last_n)) == 1:
+        last_n = recent_tool_outcomes[-_LOOP_DETECTION_WINDOW:]
+
+        if len({item.fingerprint for item in last_n}) == 1:
             return True
 
         # También consideramos bucle cuando las últimas N acciones
         # son fallos de la misma tool, aunque cambien detalles menores.
         failure_families = [
-            item.split("|", 2)[1]
+            item.family
             for item in last_n
-            if item.startswith("fail|") and "|" in item
+            if not item.success
         ]
         return (
             len(failure_families) == _LOOP_DETECTION_WINDOW
             and len(set(failure_families)) == 1
+        )
+
+    def _is_wasting_iterations(
+        self,
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
+    ) -> bool:
+        """
+        Detecta exploración o reverificación redundante tras haber avanzado.
+
+        Caso típico:
+          1. El agente modifica un archivo o genera una salida.
+          2. La verifica con éxito una vez.
+          3. Sigue listando, leyendo o ejecutando la misma verificación
+             una y otra vez sin aportar evidencia nueva.
+        """
+        if len(recent_tool_outcomes) < _EFFICIENCY_WINDOW:
+            return False
+
+        window = recent_tool_outcomes[-_EFFICIENCY_WINDOW:]
+        if not all(item.success for item in window):
+            return False
+
+        if any(item.is_mutation for item in window):
+            return False
+
+        if not any(item.is_mutation and item.success for item in recent_tool_outcomes[:-1]):
+            return False
+
+        if not all(item.is_observation or item.is_verification for item in window):
+            return False
+
+        repeated_families = {item.family for item in window}
+        verification_count = sum(1 for item in window if item.is_verification)
+        observation_count = sum(1 for item in window if item.is_observation)
+
+        return (
+            len(repeated_families) <= 2
+            or verification_count >= 3
+            or observation_count >= 3
         )
 
     def _inject_loop_intervention(self, session: InMemorySession) -> None:
@@ -969,23 +1077,38 @@ class ExecutorService:
             Message.user(_STALL_INTERVENTION_MSG)
         )
 
+    def _inject_efficiency_intervention(self, session: InMemorySession) -> None:
+        """Le indica al agente que deje de explorar y cierre la subtask."""
+        session.push_message(Message.user(_EFFICIENCY_INTERVENTION_MSG))
+
     def _remember_tool_outcome(
         self,
-        recent_tool_calls: list[str],
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
         request: ToolCallRequest,
         succeeded: bool,
         error: str | None,
     ) -> None:
         """Guarda una fingerprint compacta del resultado de una tool call."""
+        family = self._tool_family(request)
         base = f"{request.tool_name}:{self._arg_fingerprint(request.arguments)}"
         if succeeded:
             fingerprint = f"ok|{base}"
         else:
             fingerprint = f"fail|{request.tool_name}|{self._error_fingerprint(error)}|{base}"
 
-        recent_tool_calls.append(fingerprint)
-        if len(recent_tool_calls) > _LOOP_DETECTION_WINDOW * 3:
-            recent_tool_calls.pop(0)
+        snapshot = ToolOutcomeSnapshot(
+            fingerprint=fingerprint,
+            family=family,
+            success=succeeded,
+            tool_name=request.tool_name,
+            is_mutation=self._is_mutating_request(request),
+            is_observation=self._is_observation_request(request),
+            is_verification=self._is_verification_request(request),
+        )
+
+        recent_tool_outcomes.append(snapshot)
+        if len(recent_tool_outcomes) > _EFFICIENCY_WINDOW * 3:
+            recent_tool_outcomes.pop(0)
 
     # ------------------------------------------------------------------
     # Inicialización de la sesión por subtask
@@ -1197,6 +1320,99 @@ class ExecutorService:
         if "exit code" in normalized:
             return "command-failed"
         return normalized[:32]
+
+    @staticmethod
+    def _tool_family(request: ToolCallRequest) -> str:
+        """Agrupa tool calls en familias semánticas para detectar repeticiones."""
+        arguments = request.arguments
+
+        if request.tool_name == "file":
+            operation = str(arguments.get("operation", ""))
+            path = str(arguments.get("path", "")).rstrip("/")
+            return f"file:{operation}:{os.path.basename(path) or path}"
+
+        if request.tool_name == "shell":
+            command = str(arguments.get("command", "")).strip()
+            tokens = command.split()
+            if not tokens:
+                return "shell:empty"
+
+            first = tokens[0]
+            if first.startswith("python") and len(tokens) > 1:
+                for token in tokens[1:]:
+                    if token.endswith(".py"):
+                        return f"shell:{first}:{os.path.basename(token)}"
+                return f"shell:{first}"
+
+            if first in {"sed", "cat", "head", "tail"} and tokens:
+                for token in reversed(tokens):
+                    if "." in token and not token.startswith("-"):
+                        return f"shell:{first}:{os.path.basename(token)}"
+
+            return f"shell:{first}"
+
+        return request.tool_name
+
+    @staticmethod
+    def _is_mutating_request(request: ToolCallRequest) -> bool:
+        """Heurística conservadora para detectar acciones que cambian estado."""
+        arguments = request.arguments
+
+        if request.tool_name == "file":
+            return str(arguments.get("operation", "")) in {"write", "append", "patch", "delete"}
+
+        if request.tool_name != "shell":
+            return False
+
+        command = str(arguments.get("command", "")).lower()
+        mutating_markers = (
+            " --output ",
+            " --out ",
+            ">",
+            ">>",
+            "tee ",
+            "sed -i",
+            "mkdir ",
+            "touch ",
+            "mv ",
+            "cp ",
+            "rm ",
+            "apply_patch",
+            "git apply",
+            "patch ",
+        )
+        return any(marker in command for marker in mutating_markers)
+
+    @staticmethod
+    def _is_observation_request(request: ToolCallRequest) -> bool:
+        """Acciones de exploración/lectura que no suelen aportar progreso nuevo."""
+        arguments = request.arguments
+
+        if request.tool_name == "file":
+            return str(arguments.get("operation", "")) in {"read", "list", "exists"}
+
+        if request.tool_name != "shell":
+            return False
+
+        command = str(arguments.get("command", "")).strip().lower()
+        observation_prefixes = (
+            "ls", "find", "tree", "pwd", "cat", "sed", "head", "tail",
+            "rg", "grep", "fd", "stat",
+        )
+        return command.startswith(observation_prefixes)
+
+    @staticmethod
+    def _is_verification_request(request: ToolCallRequest) -> bool:
+        """Acciones que suelen servir para verificar que un cambio ya funciona."""
+        if request.tool_name != "shell":
+            return False
+
+        command = str(request.arguments.get("command", "")).strip().lower()
+        verification_prefixes = (
+            "python ", "python3 ", "pytest", "uv run", "cargo test",
+            "npm test", "pnpm test", "yarn test",
+        )
+        return command.startswith(verification_prefixes)
 
     @staticmethod
     def _task_duration(task: Task) -> float:

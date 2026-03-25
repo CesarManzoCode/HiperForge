@@ -95,7 +95,12 @@ PROTOCOLO:
 
 REGLAS:
 - Usa la herramienta más específica posible.
+- Si ya conoces el archivo objetivo, actúa directamente sobre él; no explores el repo sin necesidad.
+- No uses listados amplios (`ls`, `find`, `file list`) salvo que la ubicación sea realmente desconocida.
+- No releas completo un archivo que acabas de escribir o parchear, salvo que necesites una línea puntual.
+- Tras un cambio exitoso, verifica una vez; si ya quedó comprobado, responde con "complete".
 - No repitas la misma acción fallida sin cambiar algo.
+- No repitas verificaciones equivalentes que ya pasaron.
 - Lee errores completos antes de reintentar.
 - Usa "complete" solo si verificaste el resultado o si explicas claramente el bloqueo.
 - Intenta como máximo {max_retries} estrategias distintas.

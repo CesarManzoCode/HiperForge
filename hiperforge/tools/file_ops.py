@@ -92,10 +92,13 @@ class FileTool(BaseTool):
             description=(
                 "Realiza operaciones sobre archivos del proyecto. "
                 "Operaciones disponibles: read, write, append, patch, delete, exists, list. "
-                "Usa 'read' para ver el contenido de un archivo. "
+                "Usa 'read' solo para archivos, no para directorios. "
+                "Usa 'list' para directorios o para descubrir rutas cuando no conoces la ubicación exacta. "
+                "Si ya conoces el archivo objetivo, evita listar el proyecto completo. "
+                "Prefiere read parcial con start_line/end_line para archivos largos. "
                 "Usa 'write' para crear o sobreescribir un archivo completo. "
                 "Usa 'patch' para modificar líneas específicas sin reescribir todo. "
-                "Usa 'list' para explorar la estructura del proyecto."
+                "No releas completo un archivo que acabas de escribir salvo que sea imprescindible."
             ),
             parameters={
                 "type": "object",

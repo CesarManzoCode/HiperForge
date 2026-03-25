@@ -39,6 +39,7 @@ LLMResponse EXTENDIDO:
 
 from __future__ import annotations
 
+import json
 import time
 from abc import abstractmethod
 from dataclasses import dataclass, field
@@ -139,6 +140,7 @@ class RichLLMResponse:
     token_usage: TokenUsage
     model: str
     finish_reason: str = "stop"
+    deferred_completion_summary: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -491,6 +493,48 @@ class BaseLLMAdapter(LLMPort):
             provider=self.get_provider_name(),
             model=self.get_model_id(),
         )
+
+    def _extract_json_object_blocks(
+        self,
+        content: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """
+        Extrae uno o más objetos JSON consecutivos desde el content.
+
+        Algunos modelos devuelven varios bloques JSON seguidos:
+          {"action":"tool_call", ...}
+          {"action":"complete", ...}
+
+        Este helper permite recuperar todos los bloques válidos para que
+        el adapter pueda decidir cómo usarlos sin perder señal útil.
+        """
+        stripped = content.strip()
+        if not stripped.startswith("{"):
+            return [], ""
+
+        decoder = json.JSONDecoder()
+        idx = 0
+        blocks: list[dict[str, Any]] = []
+
+        while idx < len(stripped):
+            while idx < len(stripped) and stripped[idx].isspace():
+                idx += 1
+
+            if idx >= len(stripped) or stripped[idx] != "{":
+                break
+
+            try:
+                parsed, end_offset = decoder.raw_decode(stripped[idx:])
+            except json.JSONDecodeError:
+                return [], stripped[idx:]
+
+            if isinstance(parsed, dict):
+                blocks.append(parsed)
+
+            idx += end_offset
+
+        trailing = stripped[idx:].strip()
+        return blocks, trailing
 
     def _compress_tool_output_for_llm(self, output: str) -> str:
         """

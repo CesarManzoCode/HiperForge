@@ -279,7 +279,9 @@ class OpenAIAdapter(BaseLLMAdapter):
     def _build_response_from_stream(self, chunks: list[str]) -> RichLLMResponse:
         """Construye RichLLMResponse al terminar el stream."""
         full_content = self._stream_accumulated_content
-        tool_calls, parsed_content, finish_reason = self._parse_action_from_content(full_content)
+        tool_calls, parsed_content, finish_reason, deferred_summary = (
+            self._parse_action_from_content(full_content)
+        )
 
         token_usage = TokenUsage(
             input_tokens=self._stream_input_tokens,
@@ -293,6 +295,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             token_usage=token_usage,
             model=self._model_id,
             finish_reason=finish_reason,
+            deferred_completion_summary=deferred_summary,
         )
 
     def format_tool_result(
@@ -401,7 +404,9 @@ class OpenAIAdapter(BaseLLMAdapter):
         if choice and choice.message and choice.message.content:
             raw_content = choice.message.content
 
-        tool_calls, parsed_content, finish_reason = self._parse_action_from_content(raw_content)
+        tool_calls, parsed_content, finish_reason, deferred_summary = (
+            self._parse_action_from_content(raw_content)
+        )
 
         # Normalizamos el finish_reason de OpenAI
         if finish_reason == "stop" and choice:
@@ -421,12 +426,13 @@ class OpenAIAdapter(BaseLLMAdapter):
             token_usage=token_usage,
             model=self._model_id,
             finish_reason=finish_reason,
+            deferred_completion_summary=deferred_summary,
         )
 
     def _parse_action_from_content(
         self,
         content: str,
-    ) -> tuple[list[ToolCallRequest], str, str]:
+    ) -> tuple[list[ToolCallRequest], str, str, str | None]:
         """
         Idéntico al de AnthropicAdapter — misma lógica de parseo JSON.
 
@@ -437,31 +443,40 @@ class OpenAIAdapter(BaseLLMAdapter):
         stripped = content.strip()
 
         if not stripped.startswith("{"):
-            return [], content, "stop"
+            return [], content, "stop", None
 
-        try:
-            parsed, end_index = json.JSONDecoder().raw_decode(stripped)
-        except json.JSONDecodeError:
+        blocks, trailing_content = self._extract_json_object_blocks(stripped)
+        if not blocks:
             logger.warning(
                 "LLM devolvió JSON malformado, tratando como texto",
                 content_preview=stripped[:200],
                 provider=self.get_provider_name(),
                 task_id=self._task_id,
             )
-            return [], content, "stop"
+            return [], content, "stop", None
 
-        trailing_content = stripped[end_index:].strip()
-        if trailing_content:
+        if len(blocks) > 1 or trailing_content:
             logger.warning(
                 "LLM devolvió múltiples bloques JSON; usando el primero",
                 content_preview=stripped[:200],
-                trailing_preview=trailing_content[:120],
+                trailing_preview=(
+                    trailing_content[:120]
+                    if trailing_content
+                    else json.dumps(blocks[1], ensure_ascii=False)[:120]
+                ),
                 provider=self.get_provider_name(),
                 task_id=self._task_id,
             )
 
+        parsed = blocks[0]
         if not isinstance(parsed, dict):
-            return [], content, "stop"
+            return [], content, "stop", None
+
+        deferred_summary = None
+        for extra_block in blocks[1:]:
+            if extra_block.get(_ACTION_FIELD) == _ACTION_COMPLETE:
+                deferred_summary = str(extra_block.get("summary", "")).strip() or None
+                break
 
         action = parsed.get(_ACTION_FIELD, "")
 
@@ -470,24 +485,24 @@ class OpenAIAdapter(BaseLLMAdapter):
             arguments = parsed.get("arguments", {})
 
             if not tool_name:
-                return [], content, "stop"
+                return [], content, "stop", None
 
             tool_call = ToolCallRequest(
                 tool_call_id=generate_id(),
                 tool_name=tool_name,
                 arguments=arguments if isinstance(arguments, dict) else {},
             )
-            return [tool_call], "", "tool_use"
+            return [tool_call], "", "tool_use", deferred_summary
 
         if action == _ACTION_COMPLETE:
             summary = parsed.get("summary", "")
-            return [], summary, "complete"
+            return [], summary, "complete", None
 
         if action == _ACTION_THINK:
             think_content = parsed.get("content", "")
-            return [], think_content, "stop"
+            return [], think_content, "stop", None
 
-        return [], content, "stop"
+        return [], content, "stop", None
 
     def _normalize_finish_reason(self, openai_reason: str) -> str:
         """

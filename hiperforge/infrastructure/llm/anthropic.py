@@ -290,7 +290,9 @@ class AnthropicAdapter(BaseLLMAdapter):
         full_content = self._stream_accumulated_content
 
         # Intentamos parsear si el LLM devolvió una acción JSON
-        tool_calls, parsed_content, finish_reason = self._parse_action_from_content(full_content)
+        tool_calls, parsed_content, finish_reason, deferred_summary = (
+            self._parse_action_from_content(full_content)
+        )
 
         # Usamos el usage acumulado durante el stream
         # Si por algún error no lo tenemos, estimamos desde los chunks
@@ -306,6 +308,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             token_usage=token_usage,
             model=self._model_id,
             finish_reason=finish_reason,
+            deferred_completion_summary=deferred_summary,
         )
 
     def format_tool_result(
@@ -397,7 +400,9 @@ class AnthropicAdapter(BaseLLMAdapter):
                 raw_content += block.text
 
         # Parseamos si el LLM devolvió una acción JSON
-        tool_calls, parsed_content, finish_reason = self._parse_action_from_content(raw_content)
+        tool_calls, parsed_content, finish_reason, deferred_summary = (
+            self._parse_action_from_content(raw_content)
+        )
 
         # El finish_reason de Anthropic puede ser "end_turn", "max_tokens", "stop_sequence"
         # Normalizamos a nuestro vocabulario interno
@@ -418,12 +423,13 @@ class AnthropicAdapter(BaseLLMAdapter):
             token_usage=token_usage,
             model=self._model_id,
             finish_reason=finish_reason,
+            deferred_completion_summary=deferred_summary,
         )
 
     def _parse_action_from_content(
         self,
         content: str,
-    ) -> tuple[list[ToolCallRequest], str, str]:
+    ) -> tuple[list[ToolCallRequest], str, str, str | None]:
         """
         Parsea el contenido del LLM buscando una acción JSON.
 
@@ -441,11 +447,10 @@ class AnthropicAdapter(BaseLLMAdapter):
 
         # Si no parece JSON, es texto libre — razonamiento del agente
         if not stripped.startswith("{"):
-            return [], content, "stop"
+            return [], content, "stop", None
 
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
+        blocks, trailing_content = self._extract_json_object_blocks(stripped)
+        if not blocks:
             # JSON malformado — tratamos como texto libre
             # Loggeamos para debug pero no rompemos el flujo
             logger.warning(
@@ -454,7 +459,28 @@ class AnthropicAdapter(BaseLLMAdapter):
                 provider="anthropic",
                 task_id=self._task_id,
             )
-            return [], content, "stop"
+            return [], content, "stop", None
+
+        if len(blocks) > 1 or trailing_content:
+            logger.warning(
+                "LLM devolvió múltiples bloques JSON; usando el primero",
+                content_preview=stripped[:200],
+                trailing_preview=(
+                    trailing_content[:120]
+                    if trailing_content
+                    else json.dumps(blocks[1], ensure_ascii=False)[:120]
+                ),
+                provider="anthropic",
+                task_id=self._task_id,
+            )
+
+        parsed = blocks[0]
+
+        deferred_summary = None
+        for extra_block in blocks[1:]:
+            if extra_block.get(_ACTION_FIELD) == _ACTION_COMPLETE:
+                deferred_summary = str(extra_block.get("summary", "")).strip() or None
+                break
 
         action = parsed.get(_ACTION_FIELD, "")
 
@@ -469,7 +495,7 @@ class AnthropicAdapter(BaseLLMAdapter):
                     parsed=parsed,
                     task_id=self._task_id,
                 )
-                return [], content, "stop"
+                return [], content, "stop", None
 
             tool_call = ToolCallRequest(
                 tool_call_id=generate_id(),
@@ -477,17 +503,17 @@ class AnthropicAdapter(BaseLLMAdapter):
                 arguments=arguments if isinstance(arguments, dict) else {},
             )
 
-            return [tool_call], "", "tool_use"
+            return [tool_call], "", "tool_use", deferred_summary
 
         if action == _ACTION_COMPLETE:
             # El LLM indica que la subtask está completa
             summary = parsed.get("summary", "")
-            return [], summary, "complete"
+            return [], summary, "complete", None
 
         if action == _ACTION_THINK:
             # Razonamiento explícito del agente
             think_content = parsed.get("content", "")
-            return [], think_content, "stop"
+            return [], think_content, "stop", None
 
         # Acción desconocida — tratamos como texto libre
         logger.warning(
@@ -495,7 +521,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             action=action,
             task_id=self._task_id,
         )
-        return [], content, "stop"
+        return [], content, "stop", None
 
     def _normalize_finish_reason(self, anthropic_reason: str) -> str:
         """

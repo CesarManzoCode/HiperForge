@@ -123,7 +123,9 @@ class ShellTool(BaseTool):
                 "compilar código, ejecutar scripts, o cualquier operación "
                 "que requiera la terminal. "
                 "Captura tanto stdout como stderr. "
-                "Si el comando falla, el exit code y el error estarán en el output."
+                "Si el comando falla, el exit code y el error estarán en el output. "
+                "Evita usarla para explorar el repo con ls/find repetidos si ya conoces la ruta objetivo. "
+                "Después de una verificación exitosa no repitas el mismo comando salvo que haya cambiado algo."
             ),
             parameters={
                 "type": "object",
