@@ -1,0 +1,593 @@
+[build-system]
+# ---------------------------------------------------------------------------
+# Sistema de build: Hatchling
+#
+# Hatchling es el backend moderno recomendado por PyPA para proyectos nuevos.
+# Ventajas sobre setuptools:
+#   - Configuración 100% en pyproject.toml (sin setup.py ni MANIFEST.in)
+#   - Determinístico: builds reproducibles en cualquier máquina
+#   - Soporte nativo para src-layout y namespace packages
+#   - Integración directa con hatch para entornos de desarrollo
+# ---------------------------------------------------------------------------
+requires      = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+
+# ===========================================================================
+# METADATOS DEL PROYECTO
+# ===========================================================================
+
+[project]
+name        = "hiperforge"
+version     = "0.1.0"
+description = "Terminal AI agent for software developers — plan, execute, ship."
+readme      = "README.md"
+license     = { file = "LICENSE" }
+authors     = [
+    { name = "César Manzo", email = "cesar@hiperforge.dev" },
+]
+keywords = [
+    "ai", "agent", "llm", "cli", "developer-tools",
+    "react", "anthropic", "openai", "automation",
+]
+classifiers = [
+    # Estado del proyecto
+    "Development Status :: 3 - Alpha",
+
+    # Audiencia objetivo
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+
+    # Licencia
+    "License :: OSI Approved :: MIT License",
+
+    # Plataformas soportadas
+    # HiperForge corre en cualquier OS que soporte Python 3.10+
+    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+
+    # Versiones de Python
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+
+    # Entorno de ejecución
+    "Environment :: Console",
+    "Natural Language :: Spanish",
+    "Natural Language :: English",
+]
+
+# ---------------------------------------------------------------------------
+# Versión mínima de Python
+#
+# Requerimos 3.10 por:
+#   - Union types nativos: X | Y  (PEP 604, Python 3.10)
+#   - match/case structural pattern matching (PEP 634, Python 3.10)
+#     (usado internamente en algunos adaptadores)
+#   - Mejor performance de dataclasses y typing
+#
+# Python 3.9 sería posible con `from __future__ import annotations`
+# en todos los archivos, pero priorizamos claridad sobre compatibilidad
+# con versiones que ya no reciben actualizaciones de seguridad.
+# ---------------------------------------------------------------------------
+requires-python = ">=3.10"
+
+# ---------------------------------------------------------------------------
+# Dependencias de producción
+#
+# FILOSOFÍA DE VERSIONES:
+#   Usamos lower bounds (>=) en vez de rangos fijos (==, ~=) para:
+#     1. Permitir que los usuarios reciban parches de seguridad automáticamente.
+#     2. Evitar conflictos con otros paquetes en el entorno del usuario.
+#     3. Compatibilidad con el ecosistema Python moderno.
+#
+#   Solo usamos upper bounds (<) cuando una versión mayor tiene
+#   breaking changes confirmados que rompen la compatibilidad.
+#
+# DEPENDENCIAS ORGANIZADAS POR CATEGORÍA:
+#   [Core]     Infraestructura fundamental del proyecto
+#   [LLM]      Clientes de proveedores de modelos de lenguaje
+#   [CLI]      Interfaz de línea de comandos
+#   [Storage]  Utilidades de almacenamiento y serialización
+#   [HTTP]     Cliente HTTP para las tools web del agente
+# ---------------------------------------------------------------------------
+dependencies = [
+    # ── Core: configuración y validación ──────────────────────────────
+    # Pydantic v2 — validación de datos y schemas.
+    # v2.5+ por model_rebuild(), field_validator y model_validator estables.
+    # INCOMPATIBLE con Pydantic v1 — usa APIs completamente distintas.
+    "pydantic>=2.5.0",
+
+    # Pydantic Settings v2 — carga de variables de entorno con validación.
+    # Separado de pydantic desde v2. SettingsConfigDict requiere >=2.1.0.
+    "pydantic-settings>=2.1.0",
+
+    # ── Core: logging estructurado ─────────────────────────────────────
+    # structlog — logging estructurado con contexto enlazado.
+    # make_filtering_bound_logger y ProcessorFormatter estables desde 24.1.0.
+    "structlog>=24.1.0",
+
+    # ── CLI: interfaz de terminal ──────────────────────────────────────
+    # Typer con extras [all] instala: rich (para colores) y shellingham
+    # (para autocompletado de shell). Sin [all], Typer funciona pero sin color.
+    # pretty_exceptions_enable requiere >=0.12.0.
+    "typer[all]>=0.12.0",
+
+    # Rich — renderizado avanzado en terminal.
+    # Live display, Spinner, Traceback, Tree requieren >=13.7.0.
+    # typer[all] ya instala rich, pero lo declaramos explícitamente
+    # para garantizar la versión mínima correcta.
+    "rich>=13.7.0",
+
+    # ── LLM: clientes de proveedores ──────────────────────────────────
+    # SDK oficial de Anthropic.
+    # Usamos: Anthropic(), APIConnectionError, RateLimitError, APIStatusError.
+    # El cliente sync (no async) requiere >=0.25.0 con excepciones tipadas.
+    "anthropic>=0.25.0",
+
+    # SDK oficial de OpenAI (v1.x).
+    # También usado por GroqAdapter (API compatible).
+    # OpenAI(base_url=...) para Groq requiere >=1.12.0.
+    "openai>=1.12.0",
+
+    # ── Storage y utilidades ───────────────────────────────────────────
+    # python-ulid — generación de ULIDs ordenables cronológicamente.
+    # La clase ULID() con str(ULID()) requiere >=2.0.0 (API limpia).
+    # Fallback automático a UUID4 si no está disponible (ver ids.py).
+    "python-ulid>=2.0.0",
+
+    # ── HTTP: cliente para las tools web del agente ────────────────────
+    # requests — usado por WebTool para fetch, search y download.
+    # HTTPAdapter con Retry requiere >=2.31.0 (parche de seguridad incluido).
+    "requests>=2.31.0",
+]
+
+
+# ===========================================================================
+# ENTRY POINTS — EJECUTABLES
+# ===========================================================================
+
+[project.scripts]
+# El comando `hiperforge` estará disponible en el PATH después de instalar.
+# Apunta a cli_entry() que inicializa el sistema y delega a Typer.
+#
+# En Linux/macOS: ~/.local/bin/hiperforge (pip install --user)
+#                 /usr/local/bin/hiperforge (pip install global)
+# En Windows:     %APPDATA%\Python\Python3X\Scripts\hiperforge.exe
+#                 (con Scripts/ en el PATH del sistema)
+hiperforge = "hiperforge.cli.main:cli_entry"
+
+
+# ===========================================================================
+# DEPENDENCIAS OPCIONALES (grupos de extras)
+# ===========================================================================
+
+[project.optional-dependencies]
+# ---------------------------------------------------------------------------
+# dev — herramientas de desarrollo local
+# Instalar con: pip install -e ".[dev]"
+# ---------------------------------------------------------------------------
+dev = [
+    # Testing
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",        # Coverage con pytest
+    "pytest-asyncio>=0.23.0",   # Tests async (para adapters LLM)
+    "pytest-mock>=3.12.0",      # Mocking integrado con pytest
+
+    # Linting y formateo
+    "ruff>=0.3.0",               # Linter + formatter ultra-rápido (reemplaza black+flake8+isort)
+    "mypy>=1.9.0",               # Type checking estático
+
+    # Stubs de tipos para librerías externas
+    "types-requests>=2.31.0",   # Stubs para requests
+
+    # Herramienta de entornos virtuales
+    "hatch>=1.9.0",
+]
+
+# ---------------------------------------------------------------------------
+# test — solo lo necesario para correr los tests (CI/CD)
+# Instalar con: pip install -e ".[test]"
+# Más ligero que [dev] — no incluye linters ni hatch
+# ---------------------------------------------------------------------------
+test = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+]
+
+# ---------------------------------------------------------------------------
+# docs — herramientas para generar la documentación
+# Instalar con: pip install -e ".[docs]"
+# ---------------------------------------------------------------------------
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",       # Tema Material para MkDocs
+    "mkdocstrings[python]>=0.24.0", # Auto-generación desde docstrings
+]
+
+# ---------------------------------------------------------------------------
+# all — todos los extras para desarrollo completo
+# Instalar con: pip install -e ".[all]"
+# ---------------------------------------------------------------------------
+all = [
+    "hiperforge[dev]",
+    "hiperforge[docs]",
+]
+
+
+# ===========================================================================
+# URLs DEL PROYECTO
+# ===========================================================================
+
+[project.urls]
+Homepage       = "https://hiperforge.dev"
+Documentation  = "https://hiperforge.dev/docs"
+Repository     = "https://github.com/hiperforge/hiperforge"
+"Bug Tracker"  = "https://github.com/hiperforge/hiperforge/issues"
+Changelog      = "https://github.com/hiperforge/hiperforge/blob/main/CHANGELOG.md"
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE HATCHLING (build backend)
+# ===========================================================================
+
+[tool.hatch.build.targets.wheel]
+# El paquete vive en hiperforge/ (flat layout, no src layout).
+# Hatchling lo detecta automáticamente por la presencia de hiperforge/__init__.py.
+# Solo incluimos el código fuente Python — sin datos de test ni scripts.
+packages = ["hiperforge"]
+
+[tool.hatch.build.targets.wheel.exclude]
+# Excluimos archivos innecesarios del wheel de distribución
+patterns = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.pytest_cache",
+    "**/tests",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "scripts/",
+]
+
+[tool.hatch.build.targets.sdist]
+# Source distribution incluye todo menos artefactos de build y cache
+exclude = [
+    "/.github",
+    "/.venv",
+    "/venv",
+    "/__pycache__",
+    "/.mypy_cache",
+    "/.ruff_cache",
+    "/.pytest_cache",
+    "*.pyc",
+    "*.pyo",
+]
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE PYTEST
+# ===========================================================================
+
+[tool.pytest.ini_options]
+# Directorio raíz de los tests
+testpaths = ["tests"]
+
+# Modo asyncio para tests de adaptadores LLM y herramientas async
+asyncio_mode = "auto"
+
+# Marcadores personalizados — evita warnings de pytest sobre marcadores desconocidos
+markers = [
+    "unit: tests unitarios puros (sin I/O, sin red, sin LLM)",
+    "integration: tests de integración (con disco, sin red ni LLM real)",
+    "e2e: tests end-to-end (con red y LLM real — requieren API keys)",
+    "slow: tests que tardan más de 5 segundos",
+]
+
+# Opciones por defecto al correr pytest
+addopts = [
+    # Mostrar tests individuales (no solo el resumen)
+    "--verbose",
+    # Mostrar las 10 líneas más lentas de cada test
+    "--durations=10",
+    # Colores siempre activos (importante en CI que soporta ANSI)
+    "--color=yes",
+    # Cobertura de código — solo cuando se corre con pytest-cov explícitamente
+    # No incluimos --cov aquí para no forzarlo en runs rápidos de desarrollo
+]
+
+# Filtros de warnings — silenciamos warnings de librerías externas
+# que no son relevantes para el desarrollo de HiperForge
+filterwarnings = [
+    "error",                                      # Convertir todos los warnings en errores
+    "ignore::DeprecationWarning:pydantic.*",      # Pydantic deprecation internos
+    "ignore::DeprecationWarning:anthropic.*",     # Anthropic SDK deprecation internos
+    "ignore::DeprecationWarning:openai.*",        # OpenAI SDK deprecation internos
+    "ignore::PendingDeprecationWarning",
+    "ignore::ResourceWarning",                    # Conexiones no cerradas en tests
+]
+
+# Variables de entorno para tests — evitan llamadas reales a LLMs
+env = [
+    "HIPERFORGE_DEBUG=false",
+    "HIPERFORGE_LLM_PROVIDER=anthropic",
+]
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE COBERTURA (pytest-cov / coverage.py)
+# ===========================================================================
+
+[tool.coverage.run]
+source   = ["hiperforge"]
+branch   = true            # Cobertura de ramas (no solo líneas)
+parallel = false
+omit     = [
+    "hiperforge/__init__.py",
+    "hiperforge/cli/__init__.py",
+    "tests/*",
+    "scripts/*",
+]
+
+[tool.coverage.report]
+# Umbral mínimo de cobertura — el CI falla si baja de este porcentaje
+fail_under = 80
+show_missing  = true
+skip_covered  = false
+skip_empty    = true
+exclude_lines = [
+    # Líneas que no tiene sentido medir cobertura
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "raise AssertionError",
+    "@abstractmethod",
+    "\\.\\.\\.\\s*$",         # Ellipsis en métodos abstractos
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE RUFF (linter + formatter)
+# ===========================================================================
+
+[tool.ruff]
+# Versión objetivo de Python — ruff usa esto para saber qué sintaxis está permitida
+target-version = "py310"
+
+# Longitud máxima de línea
+# 100 es un buen balance entre legibilidad en pantallas modernas
+# y no forzar líneas artificialmente cortas
+line-length = 100
+
+# Directorios a excluir del análisis
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.pyc",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "htmlcov",
+    "scripts/",
+]
+
+[tool.ruff.lint]
+# Reglas habilitadas
+# E/W  → errores y warnings de pycodestyle
+# F    → errores de pyflakes (imports sin usar, variables sin usar)
+# I    → isort (orden de imports)
+# N    → pep8-naming (convenciones de nombres)
+# UP   → pyupgrade (modernizar sintaxis Python)
+# B    → flake8-bugbear (bugs comunes y malas prácticas)
+# SIM  → flake8-simplify (simplificaciones de código)
+# C4   → flake8-comprehensions (list/dict/set comprehensions más limpios)
+# PTH  → flake8-use-pathlib (usar pathlib en vez de os.path)
+# RUF  → reglas específicas de ruff
+select = ["E", "W", "F", "I", "N", "UP", "B", "SIM", "C4", "PTH", "RUF"]
+
+ignore = [
+    # E501 — línea demasiado larga (manejado por el formatter, no el linter)
+    "E501",
+    # B008 — no llamar funciones en defaults de argumentos
+    # Typer lo requiere para sus Option() y Argument()
+    "B008",
+    # N805 — first argument of a method should be named 'self'
+    # pydantic validators usan 'cls' como primer argumento con @classmethod
+    "N805",
+    # UP007 — use X | Y instead of Optional[X]
+    # Typer todavía requiere Optional para compatibilidad con click
+    "UP007",
+    # RUF012 — mutable class attributes should be annotated with typing.ClassVar
+    # Typer usa atributos de clase mutables por diseño
+    "RUF012",
+    # SIM108 — use ternary operator instead of if-else block
+    # A veces el if-else explícito es más legible
+    "SIM108",
+]
+
+# Reglas que ruff puede arreglar automáticamente con --fix
+fixable = ["ALL"]
+unfixable = []
+
+# Permitir variables sin usar que empiezan con _ (convención Python)
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+_*))$"
+
+[tool.ruff.lint.isort]
+# Configuración de orden de imports (compatible con isort)
+known-first-party  = ["hiperforge"]
+known-third-party  = [
+    "pydantic", "pydantic_settings", "structlog",
+    "typer", "rich", "anthropic", "openai", "requests", "ulid",
+]
+force-sort-within-sections = true
+split-on-trailing-comma    = true
+
+[tool.ruff.lint.pep8-naming]
+# Permitir nombres de funciones en mayúsculas para constantes globales
+# (ej: EXIT_SUCCESS = 0 en error_handler.py)
+classmethod-decorators = ["classmethod", "pydantic.validator", "pydantic.root_validator"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests pueden usar assert directamente (S101) y fixtures sin tipo (ANN)
+"tests/**/*.py" = ["S101", "ANN", "D"]
+# Scripts de utilidad tienen reglas más relajadas
+"scripts/**/*.py" = ["T201", "ANN", "D"]
+# __init__.py pueden tener imports sin usar (re-exportaciones)
+"**/__init__.py" = ["F401", "F403"]
+
+[tool.ruff.format]
+# Ruff formatter (reemplaza black)
+quote-style              = "double"   # Comillas dobles consistentes con Python idiomático
+indent-style             = "space"    # Espacios (no tabs) — PEP 8
+skip-magic-trailing-comma = false     # Respetar trailing commas del usuario
+line-ending              = "auto"     # Detectar automáticamente (LF en Unix, CRLF en Windows)
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE MYPY (type checker)
+# ===========================================================================
+
+[tool.mypy]
+python_version         = "3.10"
+strict                 = false   # strict=true es demasiado agresivo para un proyecto en alpha
+
+# Checks individuales habilitados
+warn_return_any        = true
+warn_unused_configs    = true
+warn_unused_ignores    = true
+warn_redundant_casts   = true
+warn_unreachable       = true
+check_untyped_defs     = true
+disallow_untyped_defs  = false   # Relajamos para comandos Typer (tipos implícitos)
+disallow_any_generics  = false
+no_implicit_optional   = true
+show_error_codes       = true    # Mostrar el código del error (ej: [return-value])
+show_column_numbers    = true
+pretty                 = true    # Output más legible en terminal
+
+# Directorios a analizar
+files = ["hiperforge"]
+
+# Ignorar imports de librerías que no tienen stubs completos
+# mypy reportaría errores en imports de estas librerías sin esta configuración
+[[tool.mypy.overrides]]
+module = [
+    "ulid.*",
+    "structlog.*",
+]
+ignore_missing_imports = true
+
+# Para tests, relajamos las reglas (fixtures, fixtures tipados con Any, etc.)
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+check_untyped_defs    = false
+
+
+# ===========================================================================
+# CONFIGURACIÓN DE HATCH (gestor de entornos de desarrollo)
+# ===========================================================================
+
+[tool.hatch.envs.default]
+# Entorno por defecto — usado para desarrollo diario
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "types-requests>=2.31.0",
+]
+
+[tool.hatch.envs.default.scripts]
+# Comandos disponibles con `hatch run <nombre>`
+# Uso: hatch run test, hatch run lint, hatch run format, etc.
+
+# Tests unitarios (rápidos, sin red ni LLM)
+test       = "pytest tests/unit -v {args}"
+
+# Tests de integración (con disco, sin red)
+test-int   = "pytest tests/integration -v {args}"
+
+# Tests completos (requiere API keys configuradas)
+test-all   = "pytest tests/ -v {args}"
+
+# Tests con cobertura
+cov        = "pytest tests/unit --cov=hiperforge --cov-report=html --cov-report=term-missing {args}"
+
+# Linting
+lint       = "ruff check hiperforge/ tests/"
+
+# Formateo
+format     = "ruff format hiperforge/ tests/"
+
+# Lint + format en un solo paso
+check      = ["ruff check hiperforge/ tests/", "ruff format --check hiperforge/ tests/"]
+
+# Type checking
+types      = "mypy hiperforge/"
+
+# Todo: lint + types + tests
+all-checks = ["ruff check hiperforge/", "mypy hiperforge/", "pytest tests/unit -v"]
+
+[tool.hatch.envs.ci]
+# Entorno específico para CI/CD — sin herramientas de desarrollo
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+]
+
+[tool.hatch.envs.ci.scripts]
+test = "pytest tests/unit tests/integration --cov=hiperforge --cov-report=xml -v"
+
+
+# ===========================================================================
+# NOTAS DE COMPATIBILIDAD MULTIPLATAFORMA
+# ===========================================================================
+#
+# LINUX (Ubuntu 20.04+, Arch, Debian, RHEL 8+):
+#   - Instalación: pip install hiperforge
+#   - El ejecutable queda en ~/.local/bin/hiperforge (pip install --user)
+#   - Asegúrate de que ~/.local/bin esté en tu PATH:
+#       echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+#
+# macOS (12 Monterey+, Intel y Apple Silicon):
+#   - Instalación: pip install hiperforge
+#   - Con Homebrew Python: /opt/homebrew/bin/hiperforge
+#   - Con sistema Python: ~/Library/Python/3.X/bin/hiperforge
+#   - Añadir al PATH si no está:
+#       echo 'export PATH="$(python3 -m site --user-base)/bin:$PATH"' >> ~/.zshrc
+#
+# WINDOWS (10 21H2+, 11):
+#   - Instalación: pip install hiperforge
+#   - El ejecutable queda en: %APPDATA%\Python\Python3X\Scripts\hiperforge.exe
+#   - Añadir Scripts\ al PATH del sistema si no está
+#   - Compatible con: PowerShell 5.1+, Windows Terminal, Git Bash, WSL2
+#   - NOTA: Rich requiere Windows Terminal o conhost.exe con VT100 habilitado.
+#     En terminales antiguas, los colores se mostrarán como texto plano.
+#
+# VERSIONES PYTHON SOPORTADAS:
+#   3.10, 3.11, 3.12, 3.13 (CPython)
+#   No soportamos PyPy — subprocess y señales OS se comportan diferente.
