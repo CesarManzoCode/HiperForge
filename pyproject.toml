@@ -259,16 +259,6 @@ patterns = [
     "scripts/",
 ]
 
-[tool.hatch.build.targets.sdist]
-# Source distribution incluye todo menos artefactos de build y cache
-exclude = [
-    "tests",
-    "/scripts",
-    "/.venv",
-    "/__pycache__"
-]
-
-
 # ===========================================================================
 # CONFIGURACIÓN DE PYTEST
 # ===========================================================================
