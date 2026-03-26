@@ -49,8 +49,12 @@ Plan de ejecución (4 pasos):
 **3 pasos para tener HiperForge funcionando:**
 
 ```bash
-# 1. Instalar
-pip install hiperforge
+# 1. Clonar e instalar desde el repositorio
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
 
 # 2. Configurar tu API key (ejemplo con Anthropic)
 export ANTHROPIC_API_KEY="sk-ant-api03-..."
@@ -72,75 +76,51 @@ hiperforge run "crea un script Python que lea un CSV y genere un reporte en HTML
 | Python | 3.10+ | `python3 --version` |
 | pip | 21.0+ | `pip --version` |
 
-### Linux
+### Instalación desde git clone (recomendada)
 
 ```bash
-# Ubuntu / Debian
-sudo apt update && sudo apt install python3 python3-pip -y
+# 1) Clona el repositorio oficial
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
 
-# Arch Linux
-sudo pacman -S python python-pip
+# 2) Crea y activa un entorno virtual
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Instalar HiperForge
-pip install hiperforge
-
-# Verificar que el ejecutable está en el PATH
-# Si no funciona, agrega ~/.local/bin a tu PATH:
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+# 3) Instala HiperForge desde el código fuente local
+pip install .
 
 # Verificar instalación
 hiperforge --version
 ```
 
-### macOS
-
-```bash
-# Con Homebrew (recomendado)
-brew install python3
-pip3 install hiperforge
-
-# El ejecutable puede quedar en una ruta fuera del PATH.
-# Agrégala con:
-echo 'export PATH="$(python3 -m site --user-base)/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-
-# Verificar instalación
-hiperforge --version
-```
-
-> **Apple Silicon (M1/M2/M3):** HiperForge funciona nativamente en ARM. No necesitas Rosetta.
-
-### Windows
-
-**Opción A — Instalación directa (recomendada):**
+### Windows (PowerShell)
 
 ```powershell
-# En PowerShell (como administrador o con Python en el PATH)
-pip install hiperforge
+# 1) Clona el repositorio oficial
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
 
-# Agregar Scripts\ al PATH si no está:
-# Panel de control → Variables de entorno → Path → Agregar:
-# C:\Users\<tu_usuario>\AppData\Roaming\Python\Python3XX\Scripts
-```
+# 2) Crea y activa un entorno virtual
+py -m venv .venv
+.venv\Scripts\Activate.ps1
 
-**Opción B — WSL2 (experiencia más fluida):**
+# 3) Instala HiperForge desde el código fuente local
+pip install .
 
-```bash
-# En WSL2 (Ubuntu)
-pip install hiperforge
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+# Verificar instalación
 hiperforge --version
 ```
 
-> **Nota Windows:** HiperForge usa Rich para colores en la terminal. Para mejor experiencia visual usa [Windows Terminal](https://aka.ms/terminal) en vez de `cmd.exe` o PowerShell clásico.
+> **Nota:** En macOS y Linux usa `source .venv/bin/activate`. En Windows usa `.venv\Scripts\Activate.ps1`.
 
 ### Instalación en modo desarrollo
 
 Si quieres contribuir al proyecto o modificar el código:
 
 ```bash
-git clone https://github.com/hiperforge/hiperforge.git
-cd hiperforge
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
 pip install -e ".[dev]"
 
 # Verificar
@@ -437,8 +417,8 @@ hiperforge task run 01HX4K2J8QNVR0SBPZ1Y3W9D6E
 ### Setup del entorno
 
 ```bash
-git clone https://github.com/hiperforge/hiperforge.git
-cd hiperforge
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
 
 # Instalar con dependencias de desarrollo
 pip install -e ".[dev]"
