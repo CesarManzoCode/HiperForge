@@ -316,8 +316,8 @@ class ShellTool(BaseTool):
             task_id=self._task_id,
         )
 
+        call_id = self._get_active_tool_call_id()
         try:
-            call_id = self._get_active_tool_call_id()
             result = subprocess.run(
                 command,
                 shell=True,
