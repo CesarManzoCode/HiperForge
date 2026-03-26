@@ -191,10 +191,21 @@ class ShellTool(BaseTool):
         Retorna False si el comando coincide con algún patrón peligroso
         o si el CommandAnalyzer detecta un riesgo de severidad BLOCK.
         """
-        command = arguments.get("command", "").strip().lower()
+        raw_command = arguments.get("command", "").strip()
+        command = raw_command.lower()
 
         if not command:
             return True  # comando vacío — fallará en execute(), no es peligroso
+
+        # Bloquear operadores de control/redirección para evitar chains mutantes
+        # incluso en comandos con prefijo normalmente seguro (ej: "ls && rm ...")
+        if any(op in command for op in ("&&", "||", "|", ">", "<", ";")):
+            logger.warning(
+                "comando bloqueado por operador de control",
+                command_preview=command[:100],
+                task_id=self._task_id,
+            )
+            return False
 
         # Comandos de solo lectura conocidos — siempre seguros
         for safe_prefix in _SAFE_PREFIXES:
@@ -305,6 +316,7 @@ class ShellTool(BaseTool):
             task_id=self._task_id,
         )
 
+        call_id = self._get_active_tool_call_id()
         try:
             result = subprocess.run(
                 command,
@@ -328,14 +340,14 @@ class ShellTool(BaseTool):
 
             if result.returncode == 0:
                 return ToolResult.success(
-                    tool_call_id=self._task_id or "direct",
+                    tool_call_id=call_id,
                     output=output,
                 )
             else:
                 # Exit code != 0 es un fallo del comando, no de la tool
                 # Lo devolvemos como failure para que el LLM lo observe
                 return ToolResult.failure(
-                    tool_call_id=self._task_id or "direct",
+                    tool_call_id=call_id,
                     error_message=f"Comando terminó con exit code {result.returncode}",
                     output=output,
                 )
@@ -351,21 +363,21 @@ class ShellTool(BaseTool):
         except FileNotFoundError as exc:
             # El comando no existe en el sistema
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Comando no encontrado: {command.split()[0]}",
                 output=str(exc),
             )
 
         except PermissionError as exc:
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Sin permisos para ejecutar: {command}",
                 output=str(exc),
             )
 
         except OSError as exc:
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Error del sistema operativo: {exc}",
                 output=str(exc),
             )

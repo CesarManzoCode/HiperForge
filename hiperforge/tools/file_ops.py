@@ -269,7 +269,7 @@ class FileTool(BaseTool):
         """Despacha a la operación correspondiente."""
         operation = arguments["operation"]
         path_str = arguments["path"]
-        call_id = self._task_id or "direct"
+        call_id = self._get_active_tool_call_id()
 
         # Resolvemos la ruta (absoluta o relativa al cwd)
         path = Path(path_str)
