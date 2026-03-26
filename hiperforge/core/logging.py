@@ -64,6 +64,9 @@ from hiperforge.core.constants import (
     LOG_ROTATION,
 )
 
+_LOGGING_CONFIGURED = False
+_FILE_HANDLER_KEY = "_hiperforge_file_handler"
+
 
 def setup_logging(
     *,
@@ -85,6 +88,11 @@ def setup_logging(
         log_dir: Directorio para el archivo de log.
                  Default: DIR_LOGS (~/.hiperforge/logs/).
     """
+    global _LOGGING_CONFIGURED
+
+    if _LOGGING_CONFIGURED:
+        return
+
     effective_log_dir = log_dir or DIR_LOGS
     log_level = "DEBUG" if debug else LOG_LEVEL_DEFAULT
 
@@ -158,6 +166,7 @@ def setup_logging(
         log_level=log_level,
         shared_processors=shared_processors,
     )
+    _LOGGING_CONFIGURED = True
 
 
 def _setup_file_logging(
@@ -184,6 +193,11 @@ def _setup_file_logging(
 
     # Handler de archivo con rotación — usando el logging estándar
     # para compatibilidad con structlog
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if getattr(handler, _FILE_HANDLER_KEY, False):
+            return
+
     file_handler = logging.handlers.TimedRotatingFileHandler(
         filename=log_path,
         when="midnight",    # rotar a medianoche
@@ -200,9 +214,10 @@ def _setup_file_logging(
         ],
     )
     file_handler.setFormatter(file_formatter)
+    setattr(file_handler, _FILE_HANDLER_KEY, True)
 
     # Agregamos el handler al logger raíz para capturar todos los logs
-    logging.getLogger().addHandler(file_handler)
+    root_logger.addHandler(file_handler)
 
 
 def get_logger(name: str) -> structlog.BoundLogger:

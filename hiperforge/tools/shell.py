@@ -76,7 +76,11 @@ _DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bkill\s+-9\b"),            # matar procesos forzado
     re.compile(r"\bpkill\b"),                # matar procesos por nombre
     re.compile(r":\(\)\{.*\|.*&\s*\}"),     # fork bomb
+    re.compile(r"\bcurl\b.+\|\s*(bash|sh)\b"),  # descargar y ejecutar script remoto
+    re.compile(r"\bwget\b.+\|\s*(bash|sh)\b"),  # descargar y ejecutar script remoto
 ]
+
+_SHELL_CONTROL_PATTERN = re.compile(r"(;|&&|\|\||\||`|\$\(|>|<)")
 
 # Comandos de solo lectura que nunca son peligrosos.
 # Si el comando empieza con alguno de estos, saltamos la verificación de seguridad.
@@ -191,6 +195,16 @@ class ShellTool(BaseTool):
         if not command:
             return True  # comando vacío — fallará en execute(), no es peligroso
 
+        # Bloquear operadores de control para evitar encadenado, pipes,
+        # subshells y redirecciones sin confirmación explícita.
+        if _SHELL_CONTROL_PATTERN.search(command):
+            logger.warning(
+                "comando bloqueado por operadores de shell",
+                command_preview=command[:100],
+                task_id=self._task_id,
+            )
+            return False
+
         # Comandos de solo lectura conocidos — siempre seguros
         for safe_prefix in _SAFE_PREFIXES:
             if command.startswith(safe_prefix.lower()):
@@ -265,6 +279,7 @@ class ShellTool(BaseTool):
         command = arguments["command"].strip()
         working_dir = arguments.get("working_dir")
         extended = arguments.get("extended_timeout", False)
+        call_id = self._get_active_tool_call_id()
 
         # Resolver el timeout efectivo
         timeout = self._resolve_timeout(arguments, extended)
@@ -300,14 +315,14 @@ class ShellTool(BaseTool):
 
             if result.returncode == 0:
                 return ToolResult.success(
-                    tool_call_id=self._task_id or "direct",
+                    tool_call_id=call_id,
                     output=output,
                 )
             else:
                 # Exit code != 0 es un fallo del comando, no de la tool
                 # Lo devolvemos como failure para que el LLM lo observe
                 return ToolResult.failure(
-                    tool_call_id=self._task_id or "direct",
+                    tool_call_id=call_id,
                     error_message=f"Comando terminó con exit code {result.returncode}",
                     output=output,
                 )
@@ -323,21 +338,21 @@ class ShellTool(BaseTool):
         except FileNotFoundError as exc:
             # El comando no existe en el sistema
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Comando no encontrado: {command.split()[0]}",
                 output=str(exc),
             )
 
         except PermissionError as exc:
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Sin permisos para ejecutar: {command}",
                 output=str(exc),
             )
 
         except OSError as exc:
             return ToolResult.failure(
-                tool_call_id=self._task_id or "direct",
+                tool_call_id=call_id,
                 error_message=f"Error del sistema operativo: {exc}",
                 output=str(exc),
             )

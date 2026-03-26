@@ -232,9 +232,9 @@ all = [
 [project.urls]
 Homepage       = "https://hiperforge.dev"
 Documentation  = "https://hiperforge.dev/docs"
-Repository     = "https://github.com/hiperforge/hiperforge"
-"Bug Tracker"  = "https://github.com/hiperforge/hiperforge/issues"
-Changelog      = "https://github.com/hiperforge/hiperforge/blob/main/CHANGELOG.md"
+Repository     = "https://github.com/CesarManzoCode/HiperForge"
+"Bug Tracker"  = "https://github.com/CesarManzoCode/HiperForge/issues"
+Changelog      = "https://github.com/CesarManzoCode/HiperForge/blob/main/CHANGELOG.md"
 
 
 # ===========================================================================
