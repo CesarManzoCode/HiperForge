@@ -94,6 +94,7 @@ class BaseTool(ToolPort):
     # Contexto de la sesión activa — seteado por el executor al inicio de cada subtask
     _task_id: str | None = None
     _subtask_id: str | None = None
+    _active_tool_call_id: str | None = None
 
     # ------------------------------------------------------------------
     # Punto de entrada principal — NUNCA sobreescribir
@@ -128,92 +129,96 @@ class BaseTool(ToolPort):
         """
         call_id = tool_call_id or "direct"
         start_time = time.monotonic()
+        self._active_tool_call_id = call_id
 
-        # Paso 1: validar argumentos antes de intentar ejecutar
-        validation_errors = self.validate_arguments(arguments)
-        if validation_errors:
-            error_msg = f"Argumentos inválidos: {'; '.join(validation_errors)}"
-            logger.warning(
-                "tool rechazada por argumentos inválidos",
-                tool=self.name,
-                errors=validation_errors,
-                task_id=self._task_id,
-            )
-            return ToolResult.failure(
-                tool_call_id=call_id,
-                error_message=error_msg,
-                output="",
-            )
-
-        # Paso 2: verificar seguridad antes de ejecutar
-        if not self.is_safe_to_run(arguments):
-            error_msg = (
-                f"La tool '{self.name}' requiere confirmación del usuario "
-                f"para estos argumentos."
-            )
-            logger.warning(
-                "tool bloqueada por verificación de seguridad",
-                tool=self.name,
-                task_id=self._task_id,
-            )
-            return ToolResult.failure(
-                tool_call_id=call_id,
-                error_message=error_msg,
-                output="",
-            )
-
-        # Paso 3: emitir evento de inicio al EventBus
-        self._emit_tool_called_event(call_id, arguments)
-
-        # Paso 4: ejecutar la tool capturando cualquier excepción
         try:
-            result = self.execute(arguments)
+            # Paso 1: validar argumentos antes de intentar ejecutar
+            validation_errors = self.validate_arguments(arguments)
+            if validation_errors:
+                error_msg = f"Argumentos inválidos: {'; '.join(validation_errors)}"
+                logger.warning(
+                    "tool rechazada por argumentos inválidos",
+                    tool=self.name,
+                    errors=validation_errors,
+                    task_id=self._task_id,
+                )
+                return ToolResult.failure(
+                    tool_call_id=call_id,
+                    error_message=error_msg,
+                    output="",
+                )
 
-        except ToolTimeoutError:
-            # ToolTimeoutError es la única excepción que se propaga
-            # El executor la captura para manejar el timeout del loop ReAct
+            # Paso 2: verificar seguridad antes de ejecutar
+            if not self.is_safe_to_run(arguments):
+                error_msg = (
+                    f"La tool '{self.name}' requiere confirmación del usuario "
+                    f"para estos argumentos."
+                )
+                logger.warning(
+                    "tool bloqueada por verificación de seguridad",
+                    tool=self.name,
+                    task_id=self._task_id,
+                )
+                return ToolResult.failure(
+                    tool_call_id=call_id,
+                    error_message=error_msg,
+                    output="",
+                )
+
+            # Paso 3: emitir evento de inicio al EventBus
+            self._emit_tool_called_event(call_id, arguments)
+
+            # Paso 4: ejecutar la tool capturando cualquier excepción
+            try:
+                result = self.execute(arguments)
+
+            except ToolTimeoutError:
+                # ToolTimeoutError es la única excepción que se propaga
+                # El executor la captura para manejar el timeout del loop ReAct
+                duration = round(time.monotonic() - start_time, 3)
+                logger.error(
+                    "tool timeout",
+                    tool=self.name,
+                    duration_seconds=duration,
+                    task_id=self._task_id,
+                )
+                raise
+
+            except Exception as exc:
+                # Cualquier otra excepción se convierte en ToolResult.failure()
+                # Nunca debe romper el loop ReAct
+                duration = round(time.monotonic() - start_time, 3)
+                error_msg = f"{type(exc).__name__}: {exc}"
+
+                logger.error(
+                    "excepción inesperada en tool",
+                    tool=self.name,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    duration_seconds=duration,
+                    task_id=self._task_id,
+                )
+
+                result = ToolResult.failure(
+                    tool_call_id=call_id,
+                    error_message=error_msg,
+                    output="",
+                )
+
             duration = round(time.monotonic() - start_time, 3)
-            logger.error(
-                "tool timeout",
-                tool=self.name,
-                duration_seconds=duration,
-                task_id=self._task_id,
-            )
-            raise
 
-        except Exception as exc:
-            # Cualquier otra excepción se convierte en ToolResult.failure()
-            # Nunca debe romper el loop ReAct
-            duration = round(time.monotonic() - start_time, 3)
-            error_msg = f"{type(exc).__name__}: {exc}"
+            # Paso 5: truncar output si excede el límite
+            result = self._truncate_output_if_needed(result)
 
-            logger.error(
-                "excepción inesperada en tool",
-                tool=self.name,
-                error_type=type(exc).__name__,
-                error=str(exc),
-                duration_seconds=duration,
-                task_id=self._task_id,
-            )
+            # Paso 6: logging estructurado de la ejecución completada
+            self._log_execution(result=result, duration=duration)
 
-            result = ToolResult.failure(
-                tool_call_id=call_id,
-                error_message=error_msg,
-                output="",
-            )
+            # Paso 7: emitir evento de resultado al EventBus
+            self._emit_tool_result_event(result=result, duration=duration)
 
-        duration = round(time.monotonic() - start_time, 3)
-
-        # Paso 5: truncar output si excede el límite
-        result = self._truncate_output_if_needed(result)
-
-        # Paso 6: logging estructurado de la ejecución completada
-        self._log_execution(result=result, duration=duration)
-
-        # Paso 7: emitir evento de resultado al EventBus
-        self._emit_tool_result_event(result=result, duration=duration)
-
-        return result
+            return result
+        finally:
+            self._active_tool_call_id = None
 
     # ------------------------------------------------------------------
     # Métodos abstractos — implementar en cada tool concreta
@@ -263,6 +268,10 @@ class BaseTool(ToolPort):
         """
         self._task_id = task_id
         self._subtask_id = subtask_id
+
+    def _get_active_tool_call_id(self) -> str:
+        """Devuelve el tool_call_id en ejecución o 'direct' fuera del dispatcher."""
+        return self._active_tool_call_id or "direct"
 
     # ------------------------------------------------------------------
     # Helpers privados del base

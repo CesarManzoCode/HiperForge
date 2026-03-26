@@ -348,7 +348,7 @@ class CodeAnalysisTool(BaseTool):
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         """Despacha a la operación correspondiente."""
         operation = arguments["operation"]
-        call_id = self._task_id or "direct"
+        call_id = self._get_active_tool_call_id()
 
         # Resolver el directorio raíz del análisis
         root_path = self._resolve_root(arguments.get("path"))

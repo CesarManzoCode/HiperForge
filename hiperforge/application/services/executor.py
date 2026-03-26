@@ -968,7 +968,21 @@ class ExecutorService:
         if on_limit_reached is not None:
             decision = on_limit_reached(subtask, iterations_used)
         else:
-            decision = LimitDecision.CANCEL
+            failed = subtask.fail()
+            task = task.update_subtask(failed)
+            get_event_bus().emit(
+                AgentEvent.subtask_failed(
+                    task_id=task.id,
+                    subtask_id=subtask.id,
+                    reason=f"Límite de {REACT_MAX_ITERATIONS_PER_SUBTASK} iteraciones alcanzado.",
+                )
+            )
+            log.warning(
+                "límite de iteraciones alcanzado",
+                decision="fail_current",
+                iterations_used=iterations_used,
+            )
+            return failed, task
 
         log.warning(
             "límite de iteraciones alcanzado",

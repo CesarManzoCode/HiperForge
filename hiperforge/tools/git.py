@@ -235,7 +235,7 @@ class GitTool(BaseTool):
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         """Despacha a la operación correspondiente."""
         operation = arguments["operation"]
-        call_id = self._task_id or "direct"
+        call_id = self._get_active_tool_call_id()
 
         # Verificar que estamos en un repositorio Git antes de operar
         if not self._is_git_repo():
