@@ -1051,7 +1051,8 @@ class ExecutorService:
     # Detección de bucles
     # ------------------------------------------------------------------
 
-    def _is_stuck_in_loop(self, recent_tool_outcomes: list[ToolOutcomeSnapshot]) -> bool:
+    @staticmethod
+    def _is_stuck_in_loop(recent_tool_outcomes: list[ToolOutcomeSnapshot]) -> bool:
         """
         Detecta si el agente está repitiendo las mismas tool calls.
 
@@ -1085,8 +1086,8 @@ class ExecutorService:
             and len(set(failure_families)) == 1
         )
 
+    @staticmethod
     def _is_wasting_iterations(
-        self,
         recent_tool_outcomes: list[ToolOutcomeSnapshot],
     ) -> bool:
         """
