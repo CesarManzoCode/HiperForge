@@ -50,8 +50,12 @@ from hiperforge.domain.entities.tool_call import ToolResult
 from hiperforge.domain.exceptions import ToolTimeoutError
 from hiperforge.domain.ports.tool_port import ToolSchema
 from hiperforge.tools.base import BaseTool, register_tool
+from hiperforge.core.guardrails import CommandAnalyzer, ViolationSeverity
 
 logger = get_logger(__name__)
+
+# Instancia singleton del analizador de comandos — reutilizada en cada llamada
+_command_analyzer = CommandAnalyzer()
 
 # ---------------------------------------------------------------------------
 # Patrones de comandos peligrosos que requieren confirmación del usuario.
@@ -76,11 +80,7 @@ _DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bkill\s+-9\b"),            # matar procesos forzado
     re.compile(r"\bpkill\b"),                # matar procesos por nombre
     re.compile(r":\(\)\{.*\|.*&\s*\}"),     # fork bomb
-    re.compile(r"\bcurl\b.+\|\s*(bash|sh)\b"),  # descargar y ejecutar script remoto
-    re.compile(r"\bwget\b.+\|\s*(bash|sh)\b"),  # descargar y ejecutar script remoto
 ]
-
-_SHELL_CONTROL_PATTERN = re.compile(r"(;|&&|\|\||\||`|\$\(|>|<)")
 
 # Comandos de solo lectura que nunca son peligrosos.
 # Si el comando empieza con alguno de estos, saltamos la verificación de seguridad.
@@ -183,34 +183,25 @@ class ShellTool(BaseTool):
         """
         Verifica si el comando es seguro para ejecutar sin confirmación.
 
-        Retorna False si el comando coincide con algún patrón peligroso.
-        El executor interpretará False como "pedir confirmación al usuario".
+        Dos niveles de verificación:
+          1. Patrones rápidos (regex) — detectan los casos más obvios
+          2. CommandAnalyzer (análisis profundo) — detecta path traversal,
+             exfiltración, evasión, pipe chains y destrucción recursiva
 
-        La verificación es conservadora — ante la duda, devuelve False.
-        Es mejor interrumpir al agente y pedir confirmación que ejecutar
-        algo destructivo sin querer.
+        Retorna False si el comando coincide con algún patrón peligroso
+        o si el CommandAnalyzer detecta un riesgo de severidad BLOCK.
         """
         command = arguments.get("command", "").strip().lower()
 
         if not command:
             return True  # comando vacío — fallará en execute(), no es peligroso
 
-        # Bloquear operadores de control para evitar encadenado, pipes,
-        # subshells y redirecciones sin confirmación explícita.
-        if _SHELL_CONTROL_PATTERN.search(command):
-            logger.warning(
-                "comando bloqueado por operadores de shell",
-                command_preview=command[:100],
-                task_id=self._task_id,
-            )
-            return False
-
         # Comandos de solo lectura conocidos — siempre seguros
         for safe_prefix in _SAFE_PREFIXES:
             if command.startswith(safe_prefix.lower()):
                 return True
 
-        # Verificar contra patrones peligrosos
+        # Nivel 1: Verificar contra patrones peligrosos rápidos
         for pattern in _DANGEROUS_PATTERNS:
             if pattern.search(command):
                 logger.warning(
@@ -220,6 +211,29 @@ class ShellTool(BaseTool):
                     task_id=self._task_id,
                 )
                 return False
+
+        # Nivel 2: Análisis profundo con CommandAnalyzer
+        # Detecta amenazas que los patrones simples no ven:
+        # path traversal, exfiltración, evasión, pipe chains
+        violation = _command_analyzer.analyze(arguments.get("command", "").strip())
+        if violation is not None:
+            if violation.severity == ViolationSeverity.BLOCK:
+                logger.warning(
+                    "comando bloqueado por CommandAnalyzer",
+                    command_preview=command[:100],
+                    guardrail=violation.guardrail,
+                    reason=violation.reason,
+                    task_id=self._task_id,
+                )
+                return False
+            elif violation.severity == ViolationSeverity.CONFIRM:
+                logger.warning(
+                    "comando requiere confirmación por CommandAnalyzer",
+                    command_preview=command[:100],
+                    reason=violation.reason,
+                    task_id=self._task_id,
+                )
+                return False  # En modo agente, CONFIRM también bloquea
 
         return True
 
@@ -279,7 +293,6 @@ class ShellTool(BaseTool):
         command = arguments["command"].strip()
         working_dir = arguments.get("working_dir")
         extended = arguments.get("extended_timeout", False)
-        call_id = self._get_active_tool_call_id()
 
         # Resolver el timeout efectivo
         timeout = self._resolve_timeout(arguments, extended)
@@ -315,14 +328,14 @@ class ShellTool(BaseTool):
 
             if result.returncode == 0:
                 return ToolResult.success(
-                    tool_call_id=call_id,
+                    tool_call_id=self._task_id or "direct",
                     output=output,
                 )
             else:
                 # Exit code != 0 es un fallo del comando, no de la tool
                 # Lo devolvemos como failure para que el LLM lo observe
                 return ToolResult.failure(
-                    tool_call_id=call_id,
+                    tool_call_id=self._task_id or "direct",
                     error_message=f"Comando terminó con exit code {result.returncode}",
                     output=output,
                 )
@@ -338,21 +351,21 @@ class ShellTool(BaseTool):
         except FileNotFoundError as exc:
             # El comando no existe en el sistema
             return ToolResult.failure(
-                tool_call_id=call_id,
+                tool_call_id=self._task_id or "direct",
                 error_message=f"Comando no encontrado: {command.split()[0]}",
                 output=str(exc),
             )
 
         except PermissionError as exc:
             return ToolResult.failure(
-                tool_call_id=call_id,
+                tool_call_id=self._task_id or "direct",
                 error_message=f"Sin permisos para ejecutar: {command}",
                 output=str(exc),
             )
 
         except OSError as exc:
             return ToolResult.failure(
-                tool_call_id=call_id,
+                tool_call_id=self._task_id or "direct",
                 error_message=f"Error del sistema operativo: {exc}",
                 output=str(exc),
             )

@@ -47,8 +47,12 @@ from hiperforge.domain.entities.tool_call import ToolResult
 from hiperforge.domain.ports.tool_port import ToolSchema
 from hiperforge.domain.value_objects.file_ref import FileRef
 from hiperforge.tools.base import BaseTool, register_tool
+from hiperforge.core.guardrails import PathGuard, ViolationSeverity
 
 logger = get_logger(__name__)
+
+# PathGuard singleton — sandbox al directorio de trabajo actual
+_path_guard = PathGuard()
 
 # Extensiones binarias conocidas — nunca intentar leer como texto
 _BINARY_EXTENSIONS: frozenset[str] = frozenset({
@@ -201,9 +205,12 @@ class FileTool(BaseTool):
         """
         Verifica que las operaciones destructivas no salgan del proyecto.
 
+        Dos niveles de verificación:
+          1. Verificación de que la ruta está dentro del cwd (original)
+          2. PathGuard — resuelve symlinks, detecta archivos sensibles (.env, .git, .ssh)
+
         Para write, append, patch y delete: verifica que la ruta
         no intente escapar del directorio de trabajo actual.
-        Esto previene que el agente modifique archivos del sistema.
         """
         operation = arguments.get("operation", "")
         path_str = arguments.get("path", "")
@@ -214,16 +221,12 @@ class FileTool(BaseTool):
         if not path_str:
             return True  # path vacío fallará en validate_arguments
 
+        # Nivel 1: verificación original de que está dentro del cwd
         try:
             target = Path(path_str).resolve()
             cwd = Path.cwd().resolve()
-
-            # La ruta debe estar dentro del directorio de trabajo
             target.relative_to(cwd)
-            return True
-
         except ValueError:
-            # relative_to lanza ValueError si target no está bajo cwd
             logger.warning(
                 "operación de escritura bloqueada — ruta fuera del directorio de trabajo",
                 operation=operation,
@@ -233,6 +236,31 @@ class FileTool(BaseTool):
             )
             return False
 
+        # Nivel 2: PathGuard — resuelve symlinks y verifica archivos sensibles
+        violation = _path_guard.validate_write(path_str)
+        if violation is not None:
+            if violation.severity == ViolationSeverity.BLOCK:
+                logger.warning(
+                    "operación bloqueada por PathGuard",
+                    operation=operation,
+                    path=path_str,
+                    reason=violation.reason,
+                    task_id=self._task_id,
+                )
+                return False
+            elif violation.severity == ViolationSeverity.CONFIRM:
+                # En modo agente, CONFIRM también bloquea por seguridad
+                logger.warning(
+                    "operación requiere confirmación por PathGuard",
+                    operation=operation,
+                    path=path_str,
+                    reason=violation.reason,
+                    task_id=self._task_id,
+                )
+                return False
+
+        return True
+
     # ------------------------------------------------------------------
     # Ejecución
     # ------------------------------------------------------------------
@@ -241,7 +269,7 @@ class FileTool(BaseTool):
         """Despacha a la operación correspondiente."""
         operation = arguments["operation"]
         path_str = arguments["path"]
-        call_id = self._get_active_tool_call_id()
+        call_id = self._task_id or "direct"
 
         # Resolvemos la ruta (absoluta o relativa al cwd)
         path = Path(path_str)
@@ -355,7 +383,9 @@ class FileTool(BaseTool):
         """
         Escribe contenido en un archivo, creando directorios intermedios si es necesario.
 
-        Si el archivo ya existe, lo sobreescribe completamente.
+        ROBUSTEZ: Si el archivo ya existe, crea un backup (.bak) antes de sobreescribir.
+        Si la escritura falla, el backup permite recuperar el contenido original.
+        El backup se elimina automáticamente si la escritura tiene éxito.
         """
         content = arguments["content"]
         encoding = arguments.get("encoding", _DEFAULT_ENCODING)
@@ -364,14 +394,56 @@ class FileTool(BaseTool):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         existed = path.exists()
+        backup_path: Path | None = None
+
+        # ROBUSTEZ: backup antes de sobreescribir archivo existente
+        if existed and path.is_file():
+            backup_path = path.with_suffix(path.suffix + ".bak")
+            try:
+                import shutil
+                shutil.copy2(str(path), str(backup_path))
+                logger.debug(
+                    "backup creado antes de sobreescribir",
+                    original=str(path),
+                    backup=str(backup_path),
+                    task_id=self._task_id,
+                )
+            except OSError as exc:
+                # Si no podemos crear backup, lo loggeamos pero continuamos
+                logger.warning(
+                    "no se pudo crear backup antes de sobreescribir",
+                    path=str(path),
+                    error=str(exc),
+                    task_id=self._task_id,
+                )
+                backup_path = None
 
         try:
             path.write_text(content, encoding=encoding)
         except OSError as exc:
+            # Si la escritura falla y tenemos backup, restauramos
+            if backup_path and backup_path.exists():
+                try:
+                    import shutil
+                    shutil.copy2(str(backup_path), str(path))
+                    logger.info(
+                        "archivo restaurado desde backup tras fallo de escritura",
+                        path=str(path),
+                        task_id=self._task_id,
+                    )
+                except OSError:
+                    pass
             return ToolResult.failure(
                 tool_call_id=call_id,
                 error_message=f"No se pudo escribir '{path}': {exc}",
             )
+
+        # Escritura exitosa — eliminar backup
+        if backup_path and backup_path.exists():
+            try:
+                backup_path.unlink()
+            except OSError:
+                pass
 
         lines = content.count("\n") + 1
         action = "actualizado" if existed else "creado"

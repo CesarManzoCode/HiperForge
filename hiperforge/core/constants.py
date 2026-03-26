@@ -219,3 +219,32 @@ ENV_LLM_PROVIDER = "HIPERFORGE_LLM_PROVIDER"
 ENV_LLM_MODEL = "HIPERFORGE_LLM_MODEL"
 ENV_DEBUG = "HIPERFORGE_DEBUG"
 ENV_APP_DIR = "HIPERFORGE_APP_DIR"   # permite sobreescribir APP_DIR (útil en tests)
+
+
+# ---------------------------------------------------------------------------
+# Configuración de guardrails y robustez
+# Estos valores se usan en hiperforge/core/guardrails.py
+# ---------------------------------------------------------------------------
+
+# Presupuesto máximo de tokens por task (input + output combinados).
+# Evita que una task con un agente atascado gaste tokens infinitamente.
+# 0 = sin límite.
+GUARDRAIL_MAX_TOKENS_PER_TASK = 100_000
+
+# Presupuesto máximo de costo por task en USD. 0.0 = sin límite.
+GUARDRAIL_MAX_COST_PER_TASK_USD = 1.00
+
+# Tiempo máximo de ejecución de una task completa en segundos. 0.0 = sin límite.
+GUARDRAIL_MAX_TASK_DURATION_SECONDS = 600.0
+
+# Fallos consecutivos de tools antes de que el CircuitBreaker corte.
+GUARDRAIL_MAX_CONSECUTIVE_TOOL_FAILURES = 5
+
+# Respuestas inválidas consecutivas del LLM antes de abortar.
+GUARDRAIL_MAX_CONSECUTIVE_LLM_ERRORS = 3
+
+# Iteraciones sin progreso (solo think, sin tool_call ni complete).
+GUARDRAIL_MAX_IDLE_ITERATIONS = 4
+
+# Umbral para avisar al agente que se acerca al límite de presupuesto.
+GUARDRAIL_BUDGET_WARNING_THRESHOLD = 0.8
