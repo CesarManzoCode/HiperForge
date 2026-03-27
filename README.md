@@ -2,13 +2,15 @@
 
 > **Terminal AI agent for software developers** — planifica, ejecuta y hace ship de código desde tu terminal.
 
-HiperForge es un agente ReAct que entiende tu instrucción en lenguaje natural, la descompone en pasos concretos y los ejecuta usando herramientas reales: shell, archivos, git, web y análisis de código. Todo desde la línea de comandos, en tu entorno local.
+HiperForge es un agente de IA orientado a desarrollo de software que corre en tu terminal, entiende instrucciones en lenguaje natural, genera un plan de ejecución y lo lleva a cabo usando herramientas reales: shell, archivos, git, web y análisis de código.
+
+Está diseñado para developers que quieren algo más que un chatbot con esteroides: un agente práctico, extensible y operable, capaz de convertir intención en acciones concretas dentro de un entorno local controlado.
 
 ```bash
 hiperforge run "agrega tests unitarios al módulo auth y asegúrate de que pasan"
 ```
 
-```
+```text
 Plan de ejecución (4 pasos):
   01. Analizar la estructura actual del módulo auth
   02. Crear tests unitarios para cada función pública
@@ -25,9 +27,67 @@ Plan de ejecución (4 pasos):
 
 ---
 
+## ¿Qué es HiperForge?
+
+HiperForge es un **framework de agente autónomo para workflows de desarrollo**.
+
+No se limita a responder texto: interpreta una instrucción, la descompone, decide qué herramienta usar, ejecuta acciones, observa resultados, corrige su curso si hace falta y devuelve una salida útil para avanzar trabajo real.
+
+En otras palabras:
+
+- **piensa en pasos**
+- **usa herramientas reales**
+- **itera sobre resultados**
+- **mantiene contexto**
+- **está hecho para developers**
+
+---
+
+## ¿Por qué existe?
+
+La mayoría de proyectos de agentes caen en uno de estos dos extremos:
+
+- **Demasiado superficiales**: bonitas demos, poca ejecución real
+- **Demasiado abstractos**: mucha arquitectura, poca utilidad operativa
+
+HiperForge busca el punto medio que sí importa en la práctica:
+
+- ejecución concreta
+- herramientas útiles
+- guardrails razonables
+- memoria y contexto
+- ergonomía de terminal
+- extensibilidad para evolucionar con el proyecto
+
+---
+
+## Principios de diseño
+
+### 1. Execution-first
+La prioridad es que el agente pueda **resolver tareas reales**, no solo producir texto convincente.
+
+### 2. Developer-native
+Todo gira alrededor del flujo natural de un developer: terminal, código, git, archivos, tests, debugging, scripts y automatización.
+
+### 3. Guardrails over chaos
+Un agente útil necesita poder actuar, pero un agente confiable necesita límites. HiperForge incorpora validación, restricciones, timeouts y control de herramientas.
+
+### 4. Extensible by default
+No está pensado como una caja cerrada, sino como una base para agregar nuevas tools, proveedores LLM, estrategias de ejecución y flujos propios.
+
+### 5. Local-first mindset
+HiperForge vive en tu máquina, en tu terminal, sobre tus archivos y tu entorno de trabajo.
+
+---
+
 ## Índice
 
 - [Quick Start](#quick-start)
+- [¿Por qué HiperForge?](#por-qué-hiperforge)
+- [Cómo funciona](#cómo-funciona)
+- [Capacidades clave](#capacidades-clave)
+- [Arquitectura](#arquitectura)
+- [Seguridad y guardrails](#seguridad-y-guardrails)
 - [Instalación](#instalación)
   - [Linux](#linux)
   - [macOS](#macos)
@@ -38,9 +98,13 @@ Plan de ejecución (4 pasos):
   - [Groq (Llama / Mixtral)](#groq-llama--mixtral)
   - [Ollama (local, sin key)](#ollama-local-sin-key)
 - [Primeros pasos](#primeros-pasos)
+- [Ejemplos de uso](#ejemplos-de-uso)
 - [Referencia de comandos](#referencia-de-comandos)
 - [Configuración avanzada](#configuración-avanzada)
 - [Desarrollo local](#desarrollo-local)
+- [Solución de problemas](#solución-de-problemas)
+- [Roadmap](#roadmap)
+- [Licencia](#licencia)
 
 ---
 
@@ -64,6 +128,157 @@ hiperforge run "crea un script Python que lea un CSV y genere un reporte en HTML
 ```
 
 > Si prefieres no usar variables de entorno, crea un archivo `.env` en tu directorio de trabajo. Ver [Configuración de API Keys](#configuración-de-api-keys).
+
+---
+
+## ¿Por qué HiperForge?
+
+Porque un agente para developers debe hacer más que “sugerir”.
+
+HiperForge está hecho para:
+
+- analizar estructuras de proyecto
+- modificar código
+- crear archivos
+- ejecutar tests
+- revisar resultados
+- iterar hasta completar una task
+- trabajar desde CLI sin fricción innecesaria
+
+### Diferenciadores
+
+- **Terminal-native**: no depende de una interfaz visual compleja
+- **ReAct loop real**: planifica, ejecuta, observa y corrige
+- **Tooling útil**: shell, archivos, git, web y code analysis
+- **Workspace/project aware**: organiza el trabajo por contextos
+- **Multi-provider**: Anthropic, OpenAI, Groq y Ollama
+- **Extensible**: puedes agregar providers, tools y flujos nuevos
+- **Operable**: pensado para tareas reales de ingeniería, no solo demos
+
+---
+
+## Cómo funciona
+
+A nivel conceptual, HiperForge sigue un flujo como este:
+
+```text
+Instrucción del usuario
+        ↓
+Interpretación de la task
+        ↓
+Generación del plan
+        ↓
+Descomposición en subtasks
+        ↓
+Loop ReAct por subtask
+  ├─ razona
+  ├─ selecciona tool
+  ├─ ejecuta
+  ├─ observa resultado
+  └─ decide siguiente paso
+        ↓
+Consolidación del resultado
+        ↓
+Salida final en CLI
+```
+
+### Ciclo operativo
+
+1. El usuario describe una tarea en lenguaje natural
+2. El planner la convierte en un plan ejecutable
+3. El executor recorre subtasks con un loop iterativo
+4. El dispatcher selecciona y ejecuta herramientas
+5. El agente evalúa el output y corrige si es necesario
+6. La CLI presenta progreso, costo, duración y estado final
+
+---
+
+## Capacidades clave
+
+### Planificación de tareas
+Transforma una instrucción abierta en una secuencia de pasos accionables.
+
+### Ejecución iterativa
+No depende de una sola respuesta. HiperForge puede reintentar, ajustar y continuar.
+
+### Orquestación de herramientas
+Integra varias herramientas dentro del flujo del agente, en lugar de tratarlas como plugins aislados.
+
+### Workspaces y proyectos
+Permite organizar tareas por contexto de trabajo y mantener trazabilidad.
+
+### Configuración multi-LLM
+Puedes elegir proveedor y modelo según latencia, costo o capacidad.
+
+### Observabilidad en terminal
+Muestra progreso, iteraciones, tiempos, tokens y costo estimado.
+
+---
+
+## Arquitectura
+
+HiperForge sigue una estructura modular orientada a separar responsabilidades:
+
+```text
+hiperforge/
+├── cli/              # Interfaz de línea de comandos (Typer + Rich)
+│   ├── commands/     # run, task, workspace, project, config
+│   └── ui/           # renderer, spinner, plan_view, confirm
+├── application/      # Use cases, services y orquestación
+│   ├── use_cases/    # run_task, create_task, plan_task, etc.
+│   └── services/     # executor, planner, tool_dispatcher
+├── domain/           # Entidades y puertos
+│   ├── entities/     # Task, Subtask, Project, Workspace, ToolCall
+│   └── ports/        # LLMPort, StoragePort, ToolPort
+├── infrastructure/   # Adaptadores concretos
+│   ├── llm/          # Anthropic, OpenAI, Groq, Ollama
+│   └── storage/      # JSON storage, workspace locator
+├── memory/           # Persistencia, repositorios, schemas, migraciones
+├── tools/            # shell, file_ops, git, web, code_analysis
+└── core/             # config, logging, constantes, eventos
+```
+
+### Componentes principales
+
+#### CLI
+La puerta de entrada del usuario. Se encarga de comandos, flags, renderizado y experiencia de terminal.
+
+#### Planner
+Genera el plan inicial a partir de la instrucción del usuario.
+
+#### Executor
+Coordina la ejecución iterativa de cada subtask.
+
+#### Tool Dispatcher
+Decide qué tool llamar, valida la invocación y enruta la ejecución.
+
+#### Memory / Storage
+Guarda estado, configuración, tareas, proyectos y workspaces.
+
+#### LLM Adapters
+Abstraen la integración con distintos proveedores de modelos.
+
+---
+
+## Seguridad y guardrails
+
+HiperForge está diseñado para ser útil, pero no irresponsable.
+
+### Mecanismos de control
+
+- validación de comandos
+- límites de iteraciones
+- timeout por tool
+- control de directorio de trabajo
+- manejo de errores
+- confirmación previa opcional del plan
+- posibilidad de revisar antes de ejecutar
+- separación entre plan y run
+
+### Filosofía de seguridad
+
+HiperForge no intenta ser un “auto-runner sin frenos”.  
+El objetivo es combinar autonomía práctica con suficiente control para hacerlo usable en entornos reales de desarrollo.
 
 ---
 
@@ -91,6 +306,28 @@ source .venv/bin/activate
 pip install .
 
 # Verificar instalación
+hiperforge --version
+```
+
+### Linux
+
+```bash
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
+hiperforge --version
+```
+
+### macOS
+
+```bash
+git clone https://github.com/CesarManzoCode/HiperForge.git
+cd HiperForge
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
 hiperforge --version
 ```
 
@@ -168,7 +405,7 @@ hiperforge config set llm.provider openai
 
 ### Groq (Llama / Mixtral)
 
-Inferencia ultra-rápida. Ideal para el loop ReAct donde la latencia importa.
+Inferencia ultra-rápida. Ideal para el loop ReAct donde la latencia importa.  
 Tier gratuito disponible con límites generosos.
 
 ```bash
@@ -189,9 +426,9 @@ curl -fsSL https://ollama.ai/install.sh | sh   # Linux/macOS
 # Windows: descargar el instalador desde https://ollama.ai
 
 # 2. Descargar un modelo
-ollama pull llama3          # 4.7 GB — buena calidad general
-ollama pull codellama       # 3.8 GB — especializado en código
-ollama pull phi3            # 2.2 GB — ligero, para máquinas con poca RAM
+ollama pull llama3
+ollama pull codellama
+ollama pull phi3
 
 # 3. Iniciar el servidor (en segundo plano)
 ollama serve &
@@ -238,28 +475,48 @@ hiperforge run "inicializa un proyecto FastAPI con estructura básica y requirem
 
 # Flujo en tres pasos (más control):
 hiperforge task create "agrega autenticación JWT al endpoint /users"
-hiperforge task plan <task_id>    # muestra el plan antes de ejecutar
-hiperforge task run  <task_id>    # ejecuta el plan
+hiperforge task plan <task_id>
+hiperforge task run  <task_id>
 ```
 
-### Ejemplos de instrucciones
+---
+
+## Ejemplos de uso
+
+### Desarrollo
 
 ```bash
-# Desarrollo
 hiperforge run "refactoriza la clase UserService para seguir los principios SOLID"
 hiperforge run "agrega manejo de errores apropiado a todas las funciones async"
 hiperforge run "crea un Dockerfile para la aplicación con multi-stage build"
+```
 
-# Testing
+### Testing
+
+```bash
 hiperforge run "escribe tests de integración para el endpoint /api/orders"
 hiperforge run "aumenta la cobertura de tests del módulo payments al 90%"
+```
 
-# Git y DevOps
+### Git y DevOps
+
+```bash
 hiperforge run "revisa los últimos 10 commits y genera un CHANGELOG.md"
 hiperforge run "configura GitHub Actions para CI con pytest y ruff"
+```
 
-# Documentación
+### Documentación
+
+```bash
 hiperforge run "documenta todas las funciones públicas del módulo core con docstrings"
+```
+
+### Modo controlado por fases
+
+```bash
+hiperforge task create "implementa rate limiting en la API" --project mi-api
+hiperforge task plan <task_id>
+hiperforge task run <task_id>
 ```
 
 ---
@@ -350,7 +607,6 @@ hiperforge config fields           [--section llm|agent|ui]
 ### Cambiar proveedor por ejecución
 
 ```bash
-# Sin cambiar la configuración global
 hiperforge run "optimiza las queries SQL" --provider groq --model llama-3.3-70b-versatile
 hiperforge run "refactoriza el módulo" --provider anthropic --model claude-opus-4-6
 ```
@@ -360,10 +616,7 @@ hiperforge run "refactoriza el módulo" --provider anthropic --model claude-opus
 Cada workspace puede tener su propia configuración de LLM:
 
 ```bash
-# El workspace "trabajo" usa Anthropic (más capaz, para proyectos críticos)
 hiperforge config set llm.provider anthropic --workspace trabajo
-
-# El workspace "experimentos" usa Groq (más rápido, para iteraciones rápidas)
 hiperforge config set llm.provider groq --workspace experimentos
 hiperforge config set llm.model llama-3.3-70b-versatile --workspace experimentos
 ```
@@ -386,12 +639,9 @@ HiperForge carga automáticamente el `.env` del directorio donde se ejecuta.
 ```bash
 # 1. Crear la task (queda en PENDING)
 hiperforge task create "implementa rate limiting en la API" --project mi-api
-# → Task ID: 01HX4K2J8QNVR0SBPZ1Y3W9D6E
 
 # 2. Generar el plan y revisarlo antes de ejecutar
 hiperforge task plan 01HX4K2J8QNVR0SBPZ1Y3W9D6E
-# Muestra los pasos que el agente ejecutará. Si no te convence,
-# ajusta la instrucción y crea una nueva task.
 
 # 3. Ejecutar el plan aprobado
 hiperforge task run 01HX4K2J8QNVR0SBPZ1Y3W9D6E
@@ -431,21 +681,19 @@ cp .env.example .env
 ### Comandos de desarrollo
 
 ```bash
-make help          # Ver todos los comandos disponibles
-
-make test          # Tests unitarios (rápidos)
-make test-int      # Tests de integración
-make cov           # Tests con reporte de cobertura
-
-make lint          # Verificar estilo con ruff
-make format        # Formatear código automáticamente
-make types         # Type checking con mypy
-make check         # Pipeline completo: format + lint + types + tests
+make help
+make test
+make test-int
+make cov
+make lint
+make format
+make types
+make check
 ```
 
 ### Estructura del proyecto
 
-```
+```text
 hiperforge/
 ├── cli/              # Interfaz de línea de comandos (Typer + Rich)
 │   ├── commands/     # Grupos de comandos: run, task, workspace, project, config
@@ -492,35 +740,39 @@ echo 'export PATH="$(python3 -m site --user-base)/bin:$PATH"' >> ~/.zshrc && sou
 
 **`AuthenticationError` o `401 Unauthorized`**
 ```bash
-# Verificar que la key está configurada
 echo $ANTHROPIC_API_KEY
-
-# Si está vacía, configurarla
 export ANTHROPIC_API_KEY="sk-ant-api03-..."
 ```
 
 **`ConnectionError` con Ollama**
 ```bash
-# Verificar que el servidor está corriendo
 ollama serve
-
-# Verificar que el modelo está descargado
 ollama list
-
-# Si no está, descargarlo
 ollama pull llama3
 ```
 
 **El agente se queda atascado en una subtask**
 
 Cuando el agente agota sus iteraciones, la CLI pregunta si quieres reintentar, omitir o cancelar. Si el problema persiste:
-```bash
-# Aumentar el límite de iteraciones
-hiperforge config set agent.max_react_iterations 25
 
-# O usar un modelo más capaz
+```bash
+hiperforge config set agent.max_react_iterations 25
 hiperforge run "..." --model claude-opus-4-6
 ```
+
+---
+
+## Roadmap
+
+Direcciones naturales para la evolución del proyecto:
+
+- más tools especializadas para desarrollo
+- mejor memoria contextual y recuperación
+- políticas de ejecución más refinadas
+- observabilidad más profunda
+- mejores flujos para repos grandes
+- soporte para estrategias más avanzadas de planificación
+- más ergonomía para equipos y entornos colaborativos
 
 ---
 
