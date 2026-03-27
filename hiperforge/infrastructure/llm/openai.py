@@ -50,18 +50,29 @@ from hiperforge.infrastructure.llm.base import (
 
 logger = get_logger(__name__)
 
-# Modelos y sus context windows reales
+# Modelos y sus context windows reales.
+# Para modelos desconocidos, get_context_window_size() devuelve 128_000 como fallback.
 _CONTEXT_WINDOWS: dict[str, int] = {
-    "gpt-4o":        128_000,
-    "gpt-4o-mini":   128_000,
-    "gpt-4-turbo":   128_000,
-    "o1":            200_000,
-    "o1-mini":       128_000,
+    "gpt-4o":           128_000,
+    "gpt-4o-mini":      128_000,
+    "gpt-4-turbo":      128_000,
+    "o1":               200_000,
+    "o1-mini":          128_000,
+    # Familia gpt-5 — usan max_completion_tokens y no soportan stop sequences.
+    # Los context windows exactos pueden variar según el modelo específico,
+    # pero 200k es el fallback seguro para la familia.
+    "gpt-5":            200_000,
+    "gpt-5-mini":       200_000,
+    "gpt-5.4-nano":     128_000,
 }
 
 # Modelos o1 — tienen restricciones especiales:
 # no soportan temperature ni streaming ni system messages
 _O1_MODELS: frozenset[str] = frozenset({"o1", "o1-mini"})
+
+# Prefijos de familias que usan max_completion_tokens en vez de max_tokens
+# y no soportan stop sequences. Incluye o1 y toda la familia gpt-5.
+_MAX_COMPLETION_TOKEN_PREFIXES: tuple[str, ...] = ("o1", "gpt-5")
 
 # Campos JSON de acciones — idénticos a Anthropic para consistencia
 _ACTION_FIELD    = "action"
@@ -124,11 +135,17 @@ class OpenAIAdapter(BaseLLMAdapter):
         return _CONTEXT_WINDOWS.get(self._model_id, 128_000)
 
     def is_available(self) -> bool:
-        """Verificación mínima de disponibilidad."""
+        """
+        Verificación mínima de disponibilidad.
+
+        Usa max_tokens=5 (no 1) porque algunos modelos rechazan max_tokens=1
+        con 400 Bad Request. El costo de 5 tokens es insignificante pero
+        evita falsos negativos en el health check.
+        """
         try:
             kwargs = self._build_kwargs(
                 api_messages=[{"role": "user", "content": "ping"}],
-                max_tokens=1,
+                max_tokens=5,
                 temperature=0.0,
                 stop_sequences=None,
             )
@@ -568,10 +585,19 @@ class OpenAIAdapter(BaseLLMAdapter):
         """
         True si el modelo espera `max_completion_tokens` en vez de `max_tokens`.
 
-        OpenAI ya exige esto en familias como `o1` y `gpt-5`.
+        OpenAI exige esto en familias como `o1` y toda la familia `gpt-5`.
+        Usamos los prefijos definidos en _MAX_COMPLETION_TOKEN_PREFIXES para
+        detectar todos los modelos de estas familias automáticamente, incluyendo
+        variantes como gpt-5.4-nano, gpt-5-mini, etc.
         """
-        return self._is_o1_model() or self._model_id.startswith("gpt-5")
+        return (
+            self._is_o1_model()
+            or self._model_id.startswith(_MAX_COMPLETION_TOKEN_PREFIXES)
+        )
 
     def _supports_stop_sequences(self) -> bool:
         """True si el modelo acepta el parámetro `stop`."""
-        return not self._is_o1_model() and not self._model_id.startswith("gpt-5")
+        return (
+            not self._is_o1_model()
+            and not self._model_id.startswith(_MAX_COMPLETION_TOKEN_PREFIXES)
+        )

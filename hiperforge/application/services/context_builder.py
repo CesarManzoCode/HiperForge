@@ -56,6 +56,7 @@ ESTRATEGIA DE TRUNCADO DEL HISTORIAL:
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from hiperforge.core.constants import LLM_CONTEXT_RESPONSE_RESERVE
@@ -98,6 +99,11 @@ REGLAS CRÍTICAS:
 - Si una tool falla, lee el error completo y cambia de enfoque.
 - Máximo {max_retries} estrategias distintas antes de completar con lo que tengas.
 - Responde con "complete" en cuanto la verificación pase.
+- NUNCA inventes valores para parámetros opcionales. Si no necesitas un parámetro, OMÍTELO. Los defaults del sistema son correctos para la mayoría de casos.
+- Si una tool rechaza tus argumentos, OMITE el parámetro problemático en vez de probar otro valor.
+- Para crear o sobrescribir archivos usa file con operation="write". NO inventes operation="create".
+- Para editar archivos existentes usa file con operation="patch" o "append" según corresponda.
+- NO uses shell con redirecciones (>, >>, heredoc) para crear archivos si file puede hacerlo.
 """
 
 # Plantilla para la sección de tools disponibles
@@ -211,11 +217,15 @@ class ContextBuilder:
         Para cada tool incluye:
           - Nombre (el string exacto que debe ir en "tool")
           - Descripción de para qué sirve y cuándo usarla
-          - Parámetros con tipo, descripción y si son requeridos
+          - Parámetros requeridos con tipo
+          - Parámetros opcionales con constraints resumidos
 
-        La calidad de esta sección impacta directamente en qué tan bien
-        el agente usa las tools. Una descripción ambigua lleva a tool calls
-        con argumentos incorrectos.
+        NOTA SOBRE CONSTRAINTS: Es crítico que los parámetros con límites
+        (como timeout con máximo de 120s) se comuniquen explícitamente.
+        Sin esta información, el LLM inventa valores fuera de rango y
+        entra en bucles de rechazo de argumentos. El costo en tokens de
+        incluir una línea extra por parámetro es insignificante comparado
+        con el costo de 5+ iteraciones desperdiciadas.
 
         Returns:
             String con la sección de tools formateada.
@@ -230,7 +240,9 @@ class ContextBuilder:
 
         for schema in schemas:
             # Encabezado compacto de la tool
-            lines.append(f'- {schema.name}: {schema.description.split(".")[0].strip()[:60]}')
+            lines.append(
+                f"- {schema.name}: {self._summarize_tool_description(schema.description)}"
+            )
 
             # Solo parámetros requeridos para reducir tokens
             props: dict[str, Any] = schema.parameters.get("properties", {})
@@ -240,16 +252,95 @@ class ContextBuilder:
                 req_parts = []
                 for param_name in required:
                     param_info = props.get(param_name, {})
-                    param_type = param_info.get("type", "any")
+                    param_type = self._format_param_type(param_info)
                     req_parts.append(f"{param_name}({param_type})")
                 lines.append(f"  Requeridos: {', '.join(req_parts)}")
 
-            # Parámetros opcionales solo como lista de nombres
+            # Parámetros opcionales — incluir constraint resumido cuando existe.
+            # Esto evita que el LLM invente valores fuera de rango.
             optional = [p for p in props if p not in required]
             if optional:
-                lines.append(f"  Opcionales: {', '.join(optional)}")
+                opt_parts = []
+                for param_name in optional:
+                    param_info = props.get(param_name, {})
+                    desc = param_info.get("description", "")
+                    param_label = param_name
+                    formatted_type = self._format_param_type(param_info)
+                    if formatted_type != "any":
+                        param_label = f"{param_name}({formatted_type})"
+                    # Extraer constraint clave de la descripción (primera frase útil)
+                    constraint_hint = self._extract_constraint_hint(desc)
+                    if constraint_hint:
+                        opt_parts.append(f"{param_label} [{constraint_hint}]")
+                    else:
+                        opt_parts.append(param_label)
+                lines.append(f"  Opcionales: {', '.join(opt_parts)}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_tool_description(description: str) -> str:
+        """
+        Resume la descripción de una tool preservando señales críticas.
+
+        A diferencia de truncar por la primera oración, conservamos
+        instrucciones útiles como enums válidos o advertencias clave.
+        """
+        compact = " ".join(description.split())
+        if len(compact) <= 160:
+            return compact
+
+        trimmed = compact[:157].rstrip(" ,.;:")
+        return f"{trimmed}..."
+
+    @staticmethod
+    def _format_param_type(param_info: dict[str, Any]) -> str:
+        """
+        Formatea el tipo de parámetro incluyendo enums pequeños cuando existen.
+        """
+        enum_values = param_info.get("enum")
+        if isinstance(enum_values, list) and 0 < len(enum_values) <= 8:
+            return "|".join(str(value) for value in enum_values)
+
+        return str(param_info.get("type", "any"))
+
+    @staticmethod
+    def _extract_constraint_hint(description: str) -> str:
+        """
+        Extrae un hint compacto de constraints desde la descripción de un parámetro.
+
+        Busca patrones como "RANGO VÁLIDO: 1 a 120", "Default: 30s", "PROHIBIDO"
+        y los compacta en una línea corta para el system prompt.
+
+        Parámetros:
+            description: Descripción completa del parámetro del schema.
+
+        Returns:
+            String compacto con el constraint (ej: "1-120s, default 30s"),
+            o string vacío si no se detectan constraints.
+        """
+        if not description:
+            return ""
+
+        desc_lower = description.lower()
+
+        # Detectar rangos numéricos con "rango válido" o "range"
+        if "rango válido" in desc_lower or "range" in desc_lower:
+            # Buscar patrón "N a M" o "N to M"
+            range_match = re.search(r"(\d+)\s+(?:a|to)\s+(\d+)", description)
+            if range_match:
+                lo, hi = range_match.group(1), range_match.group(2)
+                # Buscar default
+                default_match = re.search(r"[Dd]efault[:\s]+(\d+)", description)
+                default_hint = f", default {default_match.group(1)}" if default_match else ""
+                return f"{lo}-{hi}{default_hint}"
+
+        # Detectar "máximo" o "max"
+        max_match = re.search(r"(?:máximo|max|MÁXIMO|MAX)[:\s]+(\d+)", description)
+        if max_match:
+            return f"max {max_match.group(1)}"
+
+        return ""
 
     # ------------------------------------------------------------------
     # Gestión del historial de mensajes

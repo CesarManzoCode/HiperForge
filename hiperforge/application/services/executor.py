@@ -110,15 +110,29 @@ logger = get_logger(__name__)
 # Cuántas tool calls recientes comparar para detectar bucles
 _LOOP_DETECTION_WINDOW = 3
 
+# Ventana reducida para detección POST-intervención — si tras inyectar una
+# intervención el agente repite el mismo error 2 veces más, cortamos antes.
+_POST_INTERVENTION_DETECTION_WINDOW = 2
+
 # Ventana para detectar exploración o verificación redundante
 _EFFICIENCY_WINDOW = 4
 
 # Después de cuántas iteraciones sin progreso inyectar una intervención
 _STALL_THRESHOLD = 4
 
-# Mensaje de intervención cuando el agente está atascado
+# Mensaje genérico de intervención cuando el agente está atascado
 _STALL_INTERVENTION_MSG = """\
 {"action": "think", "content": "ATENCION: estoy en un bucle. Debo cambiar de estrategia ahora. No debo repetir la misma tool con el mismo objetivo si ya fallo. Si una ruta es un directorio, usare list/shell en vez de read. Si acabo de escribir un archivo, no debo releerlo completo salvo que sea imprescindible. Mi siguiente respuesta debe ser una sola accion util y distinta."}"""
+
+# Intervención específica para errores de argumentos inválidos repetidos.
+# Este es el caso más frecuente: el LLM envía timeout=100000 y no aprende
+# del error de validación. La intervención le dice EXACTAMENTE qué hacer.
+_ARG_VALIDATION_INTERVENTION_MSG = """\
+{"action": "think", "content": "ATENCION: estoy enviando argumentos invalidos repetidamente. El parametro timeout que envie excede el maximo del sistema. SOLUCION: debo OMITIR completamente el campo timeout de mis argumentos para usar el default del sistema, o usar extended_timeout=true si necesito mas tiempo. No debo inventar valores de timeout."}"""
+
+# Intervención para errores de tool no encontrada repetidos
+_TOOL_NOT_FOUND_INTERVENTION_MSG = """\
+{"action": "think", "content": "ATENCION: estoy usando un nombre de tool que no existe. Debo revisar las herramientas disponibles en mis instrucciones de sistema y usar exactamente uno de esos nombres."}"""
 
 _EFFICIENCY_INTERVENTION_MSG = """\
 {"action": "think", "content": "Ya tengo evidencia suficiente o estoy reverificando de forma redundante. No debo volver a listar, releer o ejecutar la misma verificacion si ya paso. Si el resultado ya fue comprobado al menos una vez, ahora debo responder con action=complete. Solo usare otra tool si aporta evidencia NUEVA."}"""
@@ -280,23 +294,62 @@ class ExecutorService:
         # Resumen de la subtask anterior — se pasa como contexto a la siguiente
         previous_subtask_summary: str | None = None
 
+        # Máximo de reintentos por subtask cuando el usuario elige "Retry".
+        # Esto evita un loop infinito de reintentos si la subtask es imposible.
+        _MAX_USER_RETRIES_PER_SUBTASK = 3
+
         # Ejecutar cada subtask en el orden del plan
         for index, subtask in enumerate(task.subtasks):
             # Notificar a la CLI del inicio de la subtask (informativo)
             if on_subtask_started is not None:
                 on_subtask_started(subtask, index, total_subtasks)
 
-            # Ejecutar la subtask con el loop ReAct
-            execution_result = self._execute_subtask(
-                task=task,
-                subtask=subtask,
-                on_limit_reached=on_subtask_limit_reached,
-                previous_subtask_summary=previous_subtask_summary,
-            )
+            # ── RETRY LOOP ──────────────────────────────────────────────
+            # Si el usuario elige "Retry" cuando una subtask agota sus
+            # iteraciones, re-ejecutamos la subtask desde cero.
+            # Limitamos a _MAX_USER_RETRIES_PER_SUBTASK para evitar
+            # reintentos infinitos en subtasks imposibles.
+            user_retries = 0
+            while True:
+                execution_result = self._execute_subtask(
+                    task=task,
+                    subtask=subtask,
+                    on_limit_reached=on_subtask_limit_reached,
+                    previous_subtask_summary=previous_subtask_summary,
+                )
 
-            # Actualizar referencias locales con el estado más reciente
-            task = execution_result.task
-            subtask = execution_result.subtask
+                # Actualizar referencias locales con el estado más reciente
+                task = execution_result.task
+                subtask = execution_result.subtask
+
+                # Si la subtask llegó a un estado terminal, salimos del retry loop
+                if subtask.is_terminal:
+                    break
+
+                # La subtask NO está en estado terminal — el usuario eligió RETRY.
+                # Verificar que no excedamos el máximo de reintentos.
+                user_retries += 1
+                if user_retries >= _MAX_USER_RETRIES_PER_SUBTASK:
+                    log.warning(
+                        "máximo de reintentos de usuario alcanzado — fallando subtask",
+                        subtask_id=subtask.id,
+                        user_retries=user_retries,
+                    )
+                    subtask = subtask.fail()
+                    task = task.update_subtask(subtask)
+                    break
+
+                # Reintentar: resetear la subtask a PENDING para re-ejecutarla
+                log.info(
+                    "reintentando subtask por decisión del usuario",
+                    subtask_id=subtask.id,
+                    user_retry=user_retries,
+                    max_retries=_MAX_USER_RETRIES_PER_SUBTASK,
+                )
+                subtask = subtask.reset_to_pending()
+                task = task.update_subtask(subtask)
+
+            # ── FIN DEL RETRY LOOP ──────────────────────────────────────
 
             # Capturar resumen de esta subtask para pasarlo a la siguiente
             if subtask.status == SubtaskStatus.COMPLETED:
@@ -431,6 +484,7 @@ class ExecutorService:
         # Estado interno del loop
         iteration = 0
         loop_detections = 0
+        interventions_applied = 0
         recent_tool_outcomes: list[ToolOutcomeSnapshot] = []
 
         # ──────────────────────────────────────────────────────────────
@@ -454,19 +508,42 @@ class ExecutorService:
                 )
             )
 
-            # Detectar si el agente está atascado en un bucle
-            if self._is_stuck_in_loop(recent_tool_outcomes):
+            # ── DETECCIÓN DE BUCLES ──────────────────────────────────
+            # Usamos ventana normal para la primera detección y ventana
+            # agresiva (más corta) después de ya haber intervenido.
+            effective_window = (
+                _POST_INTERVENTION_DETECTION_WINDOW
+                if interventions_applied > 0
+                else _LOOP_DETECTION_WINDOW
+            )
+            if self._is_stuck_in_loop(recent_tool_outcomes, window=effective_window):
                 log.warning(
                     "bucle detectado — inyectando intervención",
                     iteration=iteration,
+                    interventions_applied=interventions_applied,
                     recent_calls=[
                         item.fingerprint
-                        for item in recent_tool_outcomes[-_LOOP_DETECTION_WINDOW:]
+                        for item in recent_tool_outcomes[-effective_window:]
                     ],
                 )
-                self._inject_loop_intervention(session)
+
+                # Seleccionar intervención específica según el patrón de error
+                intervention_msg = self._select_intervention_message(
+                    recent_tool_outcomes
+                )
+                session.push_message(
+                    Message.user(intervention_msg)
+                )
                 loop_detections += 1
-                recent_tool_outcomes.clear()
+                interventions_applied += 1
+
+                # NO limpiar recent_tool_outcomes por completo — solo eliminar
+                # los últimos N para evitar re-detección inmediata, pero conservar
+                # historial suficiente para que la detección post-intervención
+                # funcione con ventana reducida.
+                if len(recent_tool_outcomes) >= effective_window:
+                    recent_tool_outcomes = recent_tool_outcomes[:-effective_window]
+
             elif self._is_wasting_iterations(recent_tool_outcomes):
                 log.warning(
                     "exploración/reverificación redundante detectada",
@@ -730,8 +807,9 @@ class ExecutorService:
         Maneja reintentos ante timeout automáticamente.
         """
         all_succeeded = True
+        unique_requests = self._dedupe_tool_requests(tool_requests)
 
-        for request in tool_requests:
+        for request in unique_requests:
             subtask, task, succeeded = self._execute_single_tool_call(
                 request=request,
                 task=task,
@@ -748,6 +826,40 @@ class ExecutorService:
                 break
 
         return subtask, task, all_succeeded
+
+    @staticmethod
+    def _dedupe_tool_requests(
+        tool_requests: list[ToolCallRequest],
+    ) -> list[ToolCallRequest]:
+        """
+        Elimina tool calls idénticas dentro de una misma respuesta del LLM.
+
+        Algunos modelos repiten accidentalmente el mismo bloque JSON dos veces.
+        Ejecutarlo dos veces solo consume iteraciones y puede contaminar el
+        historial sin aportar evidencia nueva.
+        """
+        unique_requests: list[ToolCallRequest] = []
+        seen: set[tuple[str, str]] = set()
+
+        for request in tool_requests:
+            try:
+                args_key = json.dumps(
+                    request.arguments,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                args_key = repr(request.arguments)
+
+            fingerprint = (request.tool_name, args_key)
+            if fingerprint in seen:
+                continue
+
+            seen.add(fingerprint)
+            unique_requests.append(request)
+
+        return unique_requests
 
     def _execute_single_tool_call(
         self,
@@ -996,8 +1108,16 @@ class ExecutorService:
             return subtask, task
 
         elif decision == LimitDecision.SKIP:
-            skipped = subtask.skip()
-            task = task.update_subtask(skipped)
+            # ══════════════════════════════════════════════════════════════
+            # CORRECCIÓN: La subtask está en IN_PROGRESS cuando llegamos aquí.
+            # Las transiciones válidas desde IN_PROGRESS son solo COMPLETED
+            # y FAILED. Usar skip() causaba InvalidStatusTransition porque
+            # SKIPPED solo es válido desde PENDING.
+            #
+            # Usamos fail() que es la transición correcta para "no se completó".
+            # ══════════════════════════════════════════════════════════════
+            failed = subtask.fail()
+            task = task.update_subtask(failed)
             get_event_bus().emit(
                 AgentEvent.subtask_failed(
                     task_id=task.id,
@@ -1005,14 +1125,15 @@ class ExecutorService:
                     reason=f"Omitida por decisión del usuario tras {iterations_used} iteraciones.",
                 )
             )
-            return skipped, task
+            return failed, task
 
         elif decision == LimitDecision.CANCEL:
-            skipped = subtask.skip()
-            task = task.update_subtask(skipped)
+            # Igual que SKIP: usamos fail() porque la subtask está IN_PROGRESS
+            failed = subtask.fail()
+            task = task.update_subtask(failed)
             task = task.cancel()
             get_event_bus().emit(AgentEvent.task_cancelled(task_id=task.id))
-            return skipped, task
+            return failed, task
 
         else:
             # LimitDecision desconocida o ausente — fallamos la subtask
@@ -1045,8 +1166,8 @@ class ExecutorService:
         subtask puede requerir más intentos para resolver problemas inesperados.
 
         MAPEO:
-          1-2 subtasks → REACT_MAX_ITERATIONS_SIMPLE (5)
-          3-5 subtasks → REACT_MAX_ITERATIONS_MEDIUM  (8)
+          1-2 subtasks → REACT_MAX_ITERATIONS_SIMPLE (8)
+          3-5 subtasks → REACT_MAX_ITERATIONS_MEDIUM  (12)
           6+  subtasks → REACT_MAX_ITERATIONS_PER_SUBTASK (15)
 
         Parámetros:
@@ -1066,37 +1187,53 @@ class ExecutorService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_stuck_in_loop(recent_tool_outcomes: list[ToolOutcomeSnapshot]) -> bool:
+    def _is_stuck_in_loop(
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
+        window: int = _LOOP_DETECTION_WINDOW,
+    ) -> bool:
         """
-        Detecta si el agente está repitiendo las mismas tool calls.
+        Detecta si el agente está repitiendo las mismas tool calls SIN PROGRESO.
 
-        Un bucle se detecta cuando las últimas N tool calls son idénticas
-        en nombre y argumentos. Esto indica que el agente no está
-        aprendiendo del error y necesita ser redirigido.
+        Un bucle se detecta cuando:
+          a) Las últimas N tool calls son idénticas Y al menos una falló.
+             (Dos verificaciones exitosas idénticas NO son un bucle — el agente
+             puede legítimamente ejecutar py_compile dos veces para confirmar.)
+          b) Las últimas N tool calls son todas fallos de la misma familia.
+
+        El parámetro `window` permite reducir la ventana de detección
+        después de ya haber intervenido — si el agente sigue repitiendo
+        tras una intervención, lo detectamos más rápido (window=2).
 
         Parámetros:
             recent_tool_outcomes: Lista de resultados recientes de tools.
+            window: Cuántas tool calls recientes comparar (default: 3,
+                    post-intervención: 2).
 
         Returns:
             True si se detecta un bucle, False si el agente progresa.
         """
-        if len(recent_tool_outcomes) < _LOOP_DETECTION_WINDOW:
+        if len(recent_tool_outcomes) < window:
             return False
 
-        last_n = recent_tool_outcomes[-_LOOP_DETECTION_WINDOW:]
+        last_n = recent_tool_outcomes[-window:]
 
-        if len({item.fingerprint for item in last_n}) == 1:
+        # ── Detección por fingerprint exacto ──────────────────────────
+        # Solo si al menos una call FALLÓ. Dos calls exitosos idénticos
+        # son legítimos (ej: py_compile verificando que el archivo compila).
+        has_failures = any(not item.success for item in last_n)
+        if has_failures and len({item.fingerprint for item in last_n}) == 1:
             return True
 
-        # También consideramos bucle cuando las últimas N acciones
-        # son fallos de la misma tool, aunque cambien detalles menores.
+        # ── Detección por familia de error ────────────────────────────
+        # Todas las calls en la ventana son fallos de la misma familia
+        # (misma tool, distinto detalle menor en los argumentos)
         failure_families = [
             item.family
             for item in last_n
             if not item.success
         ]
         return (
-            len(failure_families) == _LOOP_DETECTION_WINDOW
+            len(failure_families) == window
             and len(set(failure_families)) == 1
         )
 
@@ -1141,14 +1278,77 @@ class ExecutorService:
 
     def _inject_loop_intervention(self, session: InMemorySession) -> None:
         """
-        Inyecta un mensaje en el historial para romper el bucle del agente.
+        Inyecta un mensaje genérico para romper el bucle del agente.
 
-        El mensaje le recuerda al agente que está atascado y lo fuerza
-        a razonar sobre una estrategia diferente antes de actuar.
+        NOTA: Preferir _select_intervention_message() para intervenciones
+        context-aware que son más efectivas. Este método se conserva
+        para backward compatibility.
         """
         session.push_message(
             Message.user(_STALL_INTERVENTION_MSG)
         )
+
+    @staticmethod
+    def _select_intervention_message(
+        recent_tool_outcomes: list[ToolOutcomeSnapshot],
+    ) -> str:
+        """
+        Selecciona el mensaje de intervención más efectivo según el patrón
+        de error detectado en las tool calls recientes.
+
+        ESTRATEGIA:
+          En vez de siempre inyectar el mensaje genérico "cambiar de estrategia",
+          analizamos los últimos errores para dar una indicación ESPECÍFICA al LLM
+          sobre qué debe cambiar. Esto es mucho más efectivo porque los modelos
+          pequeños suelen ignorar indicaciones genéricas pero sí responden a
+          instrucciones concretas y accionables.
+
+        PATRONES RECONOCIDOS:
+          - Argumentos inválidos repetidos → decirle exactamente qué parámetro omitir
+          - Tool no encontrada repetida → recordarle las tools disponibles
+          - Mismo comando fallido repetido → sugerir cambio de estrategia concreto
+          - Default → intervención genérica
+
+        Parámetros:
+            recent_tool_outcomes: Lista de resultados recientes de tools.
+
+        Returns:
+            String JSON del mensaje de intervención a inyectar.
+        """
+        if not recent_tool_outcomes:
+            return _STALL_INTERVENTION_MSG
+
+        # Analizar los últimos errores para detectar el patrón
+        recent_errors = [
+            item for item in recent_tool_outcomes[-4:]
+            if not item.success
+        ]
+
+        if not recent_errors:
+            return _STALL_INTERVENTION_MSG
+
+        # Patrón 1: Errores de argumentos inválidos repetidos
+        # Detectado por el fingerprint que contiene "invalid" o "timeout"
+        arg_validation_errors = [
+            e for e in recent_errors
+            if "timeout" in e.fingerprint.lower()
+            or "inválid" in e.fingerprint.lower()
+            or "invalid" in e.fingerprint.lower()
+        ]
+        if len(arg_validation_errors) >= 2:
+            return _ARG_VALIDATION_INTERVENTION_MSG
+
+        # Patrón 2: Tool no encontrada repetida
+        tool_not_found_errors = [
+            e for e in recent_errors
+            if "not-found" in e.fingerprint.lower()
+            or "no encontrada" in e.fingerprint.lower()
+        ]
+        if len(tool_not_found_errors) >= 2:
+            return _TOOL_NOT_FOUND_INTERVENTION_MSG
+
+        # Default: intervención genérica
+        return _STALL_INTERVENTION_MSG
 
     def _inject_efficiency_intervention(self, session: InMemorySession) -> None:
         """Le indica al agente que deje de explorar y cierre la subtask."""

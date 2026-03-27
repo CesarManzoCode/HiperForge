@@ -184,6 +184,7 @@ REGLA PRINCIPAL: USA EL MENOR NÚMERO DE SUBTASKS POSIBLE.
 - Si la tarea es crear/modificar un solo archivo → USA 1 SUBTASK que incluya creación Y verificación.
 - Si la tarea requiere varios archivos independientes → 1 subtask por archivo.
 - Máximo {max_subtasks} subtasks. Prefiere MENOS.
+- Cada description debe medir entre 10 y 240 caracteres. Si se alarga, sintetiza.
 - Cada subtask debe indicar QUÉ hacer y CÓMO verificarlo.
 - No agregues pasos de documentación, README, limpieza o tests salvo que se pidan.
 - No incluyas pasos vagos como "asegurarse de que funciona".
@@ -600,7 +601,9 @@ class PlannerService:
                     raw_response=raw_content,
                 )
 
-            description = raw.get("description", "").strip()
+            description = self._normalize_subtask_description(
+                str(raw.get("description", ""))
+            )
             if not description:
                 raise InvalidPlanError(
                     reason=f"La subtask en posición {i} no tiene campo 'description'",
@@ -614,6 +617,41 @@ class PlannerService:
             summary=str(summary).strip(),
             raw_json=parsed,
         )
+
+    @staticmethod
+    def _normalize_subtask_description(description: str) -> str:
+        """
+        Compacta descripciones para que el planner no se auto-sabotee.
+
+        Los modelos pequeños a veces generan una descripción útil pero demasiado
+        larga. En vez de rechazarla inmediatamente, la normalizamos:
+          1. colapsamos whitespace
+          2. preservamos una cláusula final de verificación si cabe
+          3. recortamos al límite máximo sin cortar a mitad de palabra
+        """
+        compact = " ".join(description.split())
+        if len(compact) <= _MAX_SUBTASK_DESCRIPTION_LENGTH:
+            return compact
+
+        verification_match = re.search(
+            r"\b(verificar|verifica|verify|validated?|confirm)\b.*$",
+            compact,
+            re.IGNORECASE,
+        )
+        verification_clause = verification_match.group(0).strip() if verification_match else ""
+
+        if verification_clause:
+            reserved = len(verification_clause) + 1
+            if reserved < _MAX_SUBTASK_DESCRIPTION_LENGTH:
+                main_budget = _MAX_SUBTASK_DESCRIPTION_LENGTH - reserved
+                main_part = compact[:main_budget].rsplit(" ", 1)[0].rstrip(" ,.;:")
+                normalized = f"{main_part}. {verification_clause}".strip()
+                if len(normalized) <= _MAX_SUBTASK_DESCRIPTION_LENGTH:
+                    return normalized
+
+        trimmed = compact[: _MAX_SUBTASK_DESCRIPTION_LENGTH - 3]
+        trimmed = trimmed.rsplit(" ", 1)[0].rstrip(" ,.;:")
+        return f"{trimmed}..."
 
     # ------------------------------------------------------------------
     # Validación semántica del plan

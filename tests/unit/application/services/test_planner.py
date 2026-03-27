@@ -20,6 +20,7 @@ from hiperforge.application.services.planner import (
     PlannerService,
     TaskComplexity,
     _MAX_SUBTASKS_BY_COMPLEXITY,
+    _MAX_SUBTASK_DESCRIPTION_LENGTH,
 )
 from hiperforge.domain.entities.task import Task
 from hiperforge.domain.exceptions import EmptyPlanError, InvalidPlanError
@@ -169,6 +170,22 @@ class TestPlanParsing:
     def test_no_json_lanza_error(self, planner):
         with pytest.raises(InvalidPlanError):
             planner._parse_plan_response("esto no es JSON para nada", task_id="t1")
+
+    def test_normaliza_descripcion_demasiado_larga(self, planner):
+        long_desc = (
+            "Crear report.py con soporte para CSV, HTML, estilos inline, argumentos CLI, "
+            "escape de contenido, manejo de errores, encabezados configurables y salida opcional "
+            "en stdout. Verificar ejecutando py_compile y una corrida con CSV de ejemplo."
+        )
+        content = json.dumps({
+            "subtasks": [{"description": long_desc, "order": 0}],
+            "summary": "ok",
+        })
+
+        raw = planner._parse_plan_response(content, task_id="t1")
+
+        assert len(raw.subtask_descriptions[0]) <= _MAX_SUBTASK_DESCRIPTION_LENGTH
+        assert "Verificar" in raw.subtask_descriptions[0]
 
 
 # ═══════════════════════════════════════════════════════════════════

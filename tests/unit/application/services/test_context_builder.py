@@ -40,7 +40,11 @@ def mock_registry():
             description="Operaciones sobre archivos del proyecto.",
             parameters={
                 "properties": {
-                    "operation": {"type": "string", "description": "read, write, list, etc."},
+                    "operation": {
+                        "type": "string",
+                        "enum": ["read", "write", "list"],
+                        "description": "read, write, list, etc.",
+                    },
                     "path": {"type": "string", "description": "Ruta del archivo"},
                     "content": {"type": "string", "description": "Contenido a escribir"},
                 },
@@ -160,6 +164,13 @@ class TestToolsSection:
         assert "command" in msg.content
         assert "operation" in msg.content
         assert "path" in msg.content
+
+    def test_incluye_enum_de_operacion(self, builder):
+        msg = builder.build_system_message(
+            subtask_description="test",
+            task_prompt="test",
+        )
+        assert "read|write|list" in msg.content
 
     def test_sin_tools_no_crashea(self):
         empty_registry = MagicMock(spec=ToolRegistry)

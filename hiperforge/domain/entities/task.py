@@ -230,6 +230,30 @@ class Subtask:
         """La subtask fue omitida porque la task se canceló antes de llegar aquí."""
         return self._transition_to(SubtaskStatus.SKIPPED)
 
+    def reset_to_pending(self) -> Subtask:
+        """
+        Crea una nueva instancia de Subtask en estado PENDING conservando la
+        descripción y el orden, pero limpiando todo el estado de ejecución.
+
+        Usado cuando el usuario elige "Retry" tras agotar las iteraciones.
+        No es una transición de estado estándar — es un reset completo que
+        genera una Subtask fresca como si nunca se hubiera ejecutado.
+
+        NOTA: Se conserva el mismo ID para que el tracking de progreso
+        en la task funcione correctamente (update_subtask busca por ID).
+        """
+        return Subtask(
+            id=self.id,
+            task_id=self.task_id,
+            description=self.description,
+            order=self.order,
+            status=SubtaskStatus.PENDING,
+            tool_calls=(),
+            reasoning=None,
+            created_at=self.created_at,
+            completed_at=None,
+        )
+
     # ------------------------------------------------------------------
     # Métodos de actualización ReAct — producen nuevas instancias
     # ------------------------------------------------------------------

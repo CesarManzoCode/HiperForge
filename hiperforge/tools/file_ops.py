@@ -163,6 +163,7 @@ class FileTool(BaseTool):
 
     def validate_arguments(self, arguments: dict[str, Any]) -> list[str]:
         """Validaciones específicas de FileTool por operación."""
+        self._normalize_operation_alias(arguments)
         errors = super().validate_arguments(arguments)
 
         operation = arguments.get("operation", "")
@@ -200,6 +201,18 @@ class FileTool(BaseTool):
                 errors.append(f"start_line ({start}) no puede ser mayor que end_line ({end})")
 
         return errors
+
+    @staticmethod
+    def _normalize_operation_alias(arguments: dict[str, Any]) -> None:
+        """
+        Tolera aliases frecuentes del LLM para no desperdiciar iteraciones.
+
+        Caso observado: algunos modelos envían `operation="create"` aunque la
+        operación real sea `write`. Lo normalizamos antes de validar.
+        """
+        operation = arguments.get("operation")
+        if isinstance(operation, str) and operation.lower().strip() == "create":
+            arguments["operation"] = "write"
 
     def is_safe_to_run(self, arguments: dict[str, Any]) -> bool:
         """

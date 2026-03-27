@@ -26,12 +26,61 @@ def test_shell_tool_usa_tool_call_id_activo_en_resultado() -> None:
     assert result.tool_call_id == "tc-real-123"
 
 
-def test_shell_tool_bloquea_operadores_de_control() -> None:
+def test_shell_tool_bloquea_redirects() -> None:
+    """Redirects (>, <) siempre bloqueados — pueden escribir a archivos arbitrarios."""
     tool = ShellTool()
 
-    assert not tool.is_safe_to_run({"command": "ls && pwd"})
     assert not tool.is_safe_to_run({"command": "echo hola > x.txt"})
-    assert not tool.is_safe_to_run({"command": "cat file | grep todo"})
+    assert not tool.is_safe_to_run({"command": "cat < /etc/passwd"})
+    assert not tool.is_safe_to_run({"command": "python script.py >> log.txt"})
+
+
+def test_shell_tool_permite_chains_seguros() -> None:
+    """Chains con && de comandos seguros deben ser permitidos."""
+    tool = ShellTool()
+
+    # cd && command se auto-transforma a working_dir
+    args = {"command": "cd /tmp && ls"}
+    assert tool.is_safe_to_run(args)
+
+    # Chains de solo lectura
+    assert tool.is_safe_to_run({"command": "ls && pwd"})
+
+
+def test_shell_tool_bloquea_chains_peligrosos() -> None:
+    """Chains con algún segmento peligroso deben ser bloqueados."""
+    tool = ShellTool()
+
+    assert not tool.is_safe_to_run({"command": "ls && rm -rf /"})
+    assert not tool.is_safe_to_run({"command": "echo test && sudo apt install evil"})
+
+
+def test_shell_tool_ejecuta_heredoc_seguro(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tool = ShellTool()
+
+    with patch("subprocess.run") as run_mock:
+        result = tool.execute_safe(
+            {"command": "cat > sample.csv <<'CSV'\nname,age\nalice,30\nCSV"},
+            tool_call_id="tc-heredoc-1",
+        )
+
+    assert result.success
+    assert result.tool_call_id == "tc-heredoc-1"
+    assert (tmp_path / "sample.csv").read_text(encoding="utf-8") == "name,age\nalice,30\n"
+    run_mock.assert_not_called()
+
+
+def test_shell_tool_corrige_working_dir_con_case_incorrecto(tmp_path) -> None:
+    project_dir = tmp_path / "HiperForge"
+    project_dir.mkdir()
+    tool = ShellTool()
+
+    args = {"working_dir": str(tmp_path / "hiperforge"), "command": "pwd"}
+    errors = tool.validate_arguments(args)
+
+    assert errors == []
+    assert args["working_dir"] == str(project_dir)
 
 
 def test_file_tool_usa_tool_call_id_activo_en_resultado() -> None:
@@ -43,6 +92,23 @@ def test_file_tool_usa_tool_call_id_activo_en_resultado() -> None:
     )
 
     assert result.tool_call_id == "tc-file-1"
+
+
+def test_file_tool_normaliza_create_a_write(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tool = FileTool()
+
+    result = tool.execute_safe(
+        {
+            "operation": "create",
+            "path": "report.py",
+            "content": "print('ok')\n",
+        },
+        tool_call_id="tc-file-create",
+    )
+
+    assert result.success
+    assert (tmp_path / "report.py").read_text(encoding="utf-8") == "print('ok')\n"
 
 
 def test_handle_limit_reached_default_falla_subtask() -> None:

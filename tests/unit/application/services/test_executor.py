@@ -92,8 +92,17 @@ class TestLoopDetection:
         ]
         assert not ExecutorService._is_stuck_in_loop(outcomes)
 
-    def test_detecta_fingerprints_identicos(self):
-        outcomes = [self._make_outcome("same")] * _LOOP_DETECTION_WINDOW
+    def test_no_detecta_fingerprints_identicos_exitosos(self):
+        """Calls idénticos que TODOS tienen éxito NO son un bucle.
+
+        Ejemplo: dos py_compile exitosos son verificación legítima.
+        """
+        outcomes = [self._make_outcome("same", success=True)] * _LOOP_DETECTION_WINDOW
+        assert not ExecutorService._is_stuck_in_loop(outcomes)
+
+    def test_detecta_fingerprints_identicos_con_fallo(self):
+        """Calls idénticos con al menos un fallo SÍ son un bucle."""
+        outcomes = [self._make_outcome("same", success=False)] * _LOOP_DETECTION_WINDOW
         assert ExecutorService._is_stuck_in_loop(outcomes)
 
     def test_detecta_fallos_misma_familia(self):
@@ -203,6 +212,38 @@ class TestToolFamily:
         req = ToolCallRequest(tool_call_id="t1", tool_name="web", arguments={"url": "http://x"})
         family = ExecutorService._tool_family(req)
         assert family == "web"
+
+
+class TestToolRequestDeduplication:
+
+    def test_elimina_tool_calls_identicas(self):
+        requests = [
+            ToolCallRequest(tool_call_id="t1", tool_name="shell", arguments={"command": "ls"}),
+            ToolCallRequest(tool_call_id="t2", tool_name="shell", arguments={"command": "ls"}),
+            ToolCallRequest(tool_call_id="t3", tool_name="shell", arguments={"command": "pwd"}),
+        ]
+
+        deduped = ExecutorService._dedupe_tool_requests(requests)
+
+        assert [request.tool_call_id for request in deduped] == ["t1", "t3"]
+
+    def test_no_colapsa_writes_con_contenido_distinto(self):
+        requests = [
+            ToolCallRequest(
+                tool_call_id="t1",
+                tool_name="file",
+                arguments={"operation": "write", "path": "a.py", "content": "x = 1\n"},
+            ),
+            ToolCallRequest(
+                tool_call_id="t2",
+                tool_name="file",
+                arguments={"operation": "write", "path": "a.py", "content": "x = 2\n"},
+            ),
+        ]
+
+        deduped = ExecutorService._dedupe_tool_requests(requests)
+
+        assert [request.tool_call_id for request in deduped] == ["t1", "t2"]
 
 
 class TestMutationDetection:

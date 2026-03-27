@@ -84,6 +84,7 @@ LLM_DEFAULT_PROVIDER = "anthropic"
 # Modelo por defecto de cada proveedor
 LLM_DEFAULT_MODEL_ANTHROPIC = "claude-sonnet-4-6"
 LLM_DEFAULT_MODEL_OPENAI = "gpt-4o"
+LLM_DEFAULT_MODEL_GROQ = "llama-3.3-70b-versatile"
 LLM_DEFAULT_MODEL_OLLAMA = "llama3"
 
 # Parámetros de generación — bajos para el agente (queremos precisión, no creatividad)
@@ -91,7 +92,16 @@ LLM_DEFAULT_TEMPERATURE = 0.2
 LLM_DEFAULT_MAX_TOKENS = 4096
 LLM_DEFAULT_MAX_TOKENS_PLANNING = 1024   # el plan no necesita respuestas largas
 LLM_DEFAULT_MAX_TOKENS_SUMMARY = 1024    # el resumen final tampoco
-LLM_DEFAULT_MAX_TOKENS_REACT = 1024      # cada iteración ReAct debe ser corta y concreta
+
+# Tokens máximos por iteración del loop ReAct.
+# NOTA: El valor anterior (1024) era insuficiente para iteraciones donde el
+# agente escribe archivos completos — un script Python de 30 líneas dentro
+# del JSON de action=tool_call necesita ~600-800 tokens solo para el contenido,
+# más ~100 tokens del wrapper JSON. Con 1024 el LLM generaba finish_reason=
+# max_tokens y la respuesta llegaba truncada e imposible de parsear.
+# 2048 da margen suficiente para file writes de tamaño mediano sin desperdiciar
+# tokens en iteraciones que solo ejecutan un shell command (~100-200 tokens).
+LLM_DEFAULT_MAX_TOKENS_REACT = 2048
 
 # Tamaño del context window por defecto (para modelos desconocidos)
 LLM_DEFAULT_CONTEXT_WINDOW = 8_192
@@ -119,11 +129,18 @@ REACT_MAX_ITERATIONS_PER_SUBTASK = 15
 
 # Iteraciones dinámicas según complejidad del plan.
 # El executor usa el número de subtasks como proxy de complejidad:
-#   1-2 subtasks → SIMPLE → pocas iteraciones por subtask
-#   3-5 subtasks → MEDIUM → iteraciones moderadas
+#   1-2 subtasks → SIMPLE → iteraciones suficientes para write + verify + recovery
+#   3-5 subtasks → MEDIUM → iteraciones moderadas con margen ante errores
 #   6+  subtasks → COMPLEX → máximo de iteraciones
-REACT_MAX_ITERATIONS_SIMPLE = 5
-REACT_MAX_ITERATIONS_MEDIUM = 8
+#
+# NOTA: Valores anteriores (5/8) eran insuficientes cuando el LLM enviaba
+# argumentos inválidos repetidos — no quedaba margen para recuperarse tras
+# la intervención de bucle. Los nuevos valores (8/12) dan espacio para:
+#   - 1-2 iteraciones de trabajo real (write + verify)
+#   - 2-3 iteraciones de margen ante errores de argumentos o bucles
+#   - 1 iteración de intervención + recovery
+REACT_MAX_ITERATIONS_SIMPLE = 8
+REACT_MAX_ITERATIONS_MEDIUM = 12
 
 # Máximo de subtasks que puede tener un plan.
 # Planes muy largos suelen ser síntoma de un prompt muy vago.
@@ -214,6 +231,7 @@ CLI_SEPARATOR = "─" * 60
 
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
+ENV_GROQ_API_KEY = "GROQ_API_KEY"
 ENV_OLLAMA_BASE_URL = "OLLAMA_BASE_URL"
 ENV_LLM_PROVIDER = "HIPERFORGE_LLM_PROVIDER"
 ENV_LLM_MODEL = "HIPERFORGE_LLM_MODEL"

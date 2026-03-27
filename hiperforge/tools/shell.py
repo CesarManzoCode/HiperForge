@@ -36,6 +36,7 @@ STREAMS:
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -50,13 +51,12 @@ from hiperforge.domain.entities.tool_call import ToolResult
 from hiperforge.domain.exceptions import ToolTimeoutError
 from hiperforge.domain.ports.tool_port import ToolSchema
 from hiperforge.tools.base import BaseTool, register_tool
-from hiperforge.core.guardrails import CommandAnalyzer, ViolationSeverity
+from hiperforge.core.guardrails import CommandAnalyzer, PathGuard, ViolationSeverity
 
 logger = get_logger(__name__)
 
 # Instancia singleton del analizador de comandos — reutilizada en cada llamada
 _command_analyzer = CommandAnalyzer()
-
 # ---------------------------------------------------------------------------
 # Patrones de comandos peligrosos que requieren confirmación del usuario.
 #
@@ -129,7 +129,8 @@ class ShellTool(BaseTool):
                 "Captura tanto stdout como stderr. "
                 "Si el comando falla, el exit code y el error estarán en el output. "
                 "Evita usarla para explorar el repo con ls/find repetidos si ya conoces la ruta objetivo. "
-                "Después de una verificación exitosa no repitas el mismo comando salvo que haya cambiado algo."
+                "Después de una verificación exitosa no repitas el mismo comando salvo que haya cambiado algo. "
+                "Para crear archivos prefiere FileTool/write en vez de redirecciones > o heredoc."
             ),
             parameters={
                 "type": "object",
@@ -156,18 +157,20 @@ class ShellTool(BaseTool):
                     "timeout": {
                         "type": "number",
                         "description": (
-                            f"Tiempo máximo de ejecución en segundos. "
-                            f"Default: {TOOL_DEFAULT_TIMEOUT_SECONDS}s. "
-                            f"Para operaciones lentas (npm install, cargo build) "
-                            f"usar hasta {TOOL_EXTENDED_TIMEOUT_SECONDS}s."
+                            f"Tiempo máximo en segundos. RANGO VÁLIDO: 1 a "
+                            f"{int(TOOL_EXTENDED_TIMEOUT_SECONDS)}. "
+                            f"Default: {int(TOOL_DEFAULT_TIMEOUT_SECONDS)}s (se usa si omites este campo). "
+                            f"PROHIBIDO enviar valores mayores a {int(TOOL_EXTENDED_TIMEOUT_SECONDS)}. "
+                            f"Para la mayoría de comandos, OMITE este campo y usa el default."
                         ),
                     },
                     "extended_timeout": {
                         "type": "boolean",
                         "description": (
                             "Si true, usa el timeout extendido "
-                            f"({TOOL_EXTENDED_TIMEOUT_SECONDS}s) automáticamente. "
-                            "Útil para instalaciones de dependencias o compilaciones."
+                            f"({int(TOOL_EXTENDED_TIMEOUT_SECONDS)}s) automáticamente. "
+                            "Útil para instalaciones de dependencias o compilaciones. "
+                            "Preferir este flag en vez de especificar timeout manualmente."
                         ),
                     },
                 },
@@ -183,13 +186,18 @@ class ShellTool(BaseTool):
         """
         Verifica si el comando es seguro para ejecutar sin confirmación.
 
-        Dos niveles de verificación:
-          1. Patrones rápidos (regex) — detectan los casos más obvios
-          2. CommandAnalyzer (análisis profundo) — detecta path traversal,
+        Tres niveles de verificación:
+          1. Auto-transformación de `cd <path> && <cmd>` a working_dir (sin bloquear)
+          2. Si hay operadores de control (&&, ||, ;, |), verificar CADA segmento
+             individualmente contra patrones peligrosos
+          3. CommandAnalyzer (análisis profundo) — detecta path traversal,
              exfiltración, evasión, pipe chains y destrucción recursiva
 
-        Retorna False si el comando coincide con algún patrón peligroso
-        o si el CommandAnalyzer detecta un riesgo de severidad BLOCK.
+        CAMBIO RESPECTO A LA VERSIÓN ANTERIOR:
+          Antes se bloqueaban TODOS los comandos con &&, ||, etc. Esto era
+          demasiado agresivo — el LLM usa `cd /path && python script.py`
+          constantemente, que es un patrón perfectamente seguro. Ahora
+          verificamos cada segmento del chain individualmente.
         """
         raw_command = arguments.get("command", "").strip()
         command = raw_command.lower()
@@ -197,16 +205,70 @@ class ShellTool(BaseTool):
         if not command:
             return True  # comando vacío — fallará en execute(), no es peligroso
 
-        # Bloquear operadores de control/redirección para evitar chains mutantes
-        # incluso en comandos con prefijo normalmente seguro (ej: "ls && rm ...")
-        if any(op in command for op in ("&&", "||", "|", ">", "<", ";")):
+        # ── AUTO-TRANSFORMACIÓN: cd <path> && <resto> ─────────────────
+        # El LLM usa este patrón constantemente en vez de working_dir.
+        # En vez de bloquearlo, lo transformamos transparentemente.
+        self._auto_transform_cd_chain(arguments)
+        raw_command = arguments.get("command", "").strip()
+        command = raw_command.lower()
+
+        if self._is_safe_heredoc_write(arguments):
+            return True
+
+        # ── BLOQUEO DE REDIRECTS ──────────────────────────────────────
+        # Los operadores de redirección (>, <, >>) pueden escribir a
+        # archivos arbitrarios incluso desde comandos aparentemente seguros.
+        # Se bloquean siempre, a diferencia de && y || que se verifican
+        # por segmentos.
+        if any(op in command for op in (">", "<")):
             logger.warning(
-                "comando bloqueado por operador de control",
+                "comando bloqueado por operador de redirección",
                 command_preview=command[:100],
                 task_id=self._task_id,
             )
             return False
 
+        # ── VERIFICACIÓN POR SEGMENTOS ────────────────────────────────
+        # Si el comando contiene operadores de control, verificamos cada
+        # segmento individualmente contra patrones peligrosos.
+        # Un chain es seguro solo si TODOS sus segmentos son seguros.
+        if any(op in command for op in ("&&", "||", ";", "|")):
+            segments = re.split(r'\s*(?:&&|\|\|?|;)\s*', command)
+            for segment in segments:
+                segment = segment.strip()
+                if not segment:
+                    continue
+
+                # Verificar contra patrones peligrosos
+                for pattern in _DANGEROUS_PATTERNS:
+                    if pattern.search(segment):
+                        logger.warning(
+                            "segmento de comando bloqueado por patrón peligroso",
+                            command_preview=command[:100],
+                            dangerous_segment=segment[:60],
+                            pattern=pattern.pattern,
+                            task_id=self._task_id,
+                        )
+                        return False
+
+            # Verificar el comando completo con CommandAnalyzer
+            violation = _command_analyzer.analyze(raw_command)
+            if violation is not None and violation.severity in (
+                ViolationSeverity.BLOCK,
+                ViolationSeverity.CONFIRM,
+            ):
+                logger.warning(
+                    "comando con operadores bloqueado por CommandAnalyzer",
+                    command_preview=command[:100],
+                    reason=violation.reason,
+                    task_id=self._task_id,
+                )
+                return False
+
+            # Todos los segmentos son seguros y CommandAnalyzer aprueba
+            return True
+
+        # ── CAMINO ESTÁNDAR (sin operadores) ──────────────────────────
         # Comandos de solo lectura conocidos — siempre seguros
         for safe_prefix in _SAFE_PREFIXES:
             if command.startswith(safe_prefix.lower()):
@@ -224,9 +286,7 @@ class ShellTool(BaseTool):
                 return False
 
         # Nivel 2: Análisis profundo con CommandAnalyzer
-        # Detecta amenazas que los patrones simples no ven:
-        # path traversal, exfiltración, evasión, pipe chains
-        violation = _command_analyzer.analyze(arguments.get("command", "").strip())
+        violation = _command_analyzer.analyze(raw_command)
         if violation is not None:
             if violation.severity == ViolationSeverity.BLOCK:
                 logger.warning(
@@ -248,16 +308,153 @@ class ShellTool(BaseTool):
 
         return True
 
+    @staticmethod
+    def _auto_transform_cd_chain(arguments: dict[str, Any]) -> None:
+        """
+        Transforma `cd <path> && <cmd>` en working_dir=<path>, command=<cmd>.
+
+        Este es el patrón más frecuente que los LLMs generan para ejecutar
+        comandos en un directorio específico. En vez de bloquearlo por el
+        operador &&, lo convertimos transparentemente al formato correcto
+        usando el parámetro working_dir que ShellTool ya soporta.
+
+        PATRON DETECTADO:
+          command: "cd /home/user/project && python script.py"
+          →
+          command: "python script.py"
+          working_dir: "/home/user/project"
+
+        SOLO se transforma si:
+          - El comando empieza con "cd " seguido de una ruta
+          - La ruta no contiene operadores peligrosos
+          - No hay working_dir ya especificado en los argumentos
+          - El comando después del && no contiene más operadores de cadena
+        """
+        command = arguments.get("command", "").strip()
+        if not command.startswith("cd "):
+            return
+
+        # Solo transformar si no hay working_dir ya especificado
+        if arguments.get("working_dir"):
+            return
+
+        # Buscar el patrón "cd <path> && <rest>"
+        match = re.match(
+            r'^cd\s+([^\s&|;><]+(?:\s+[^\s&|;><]+)*?)\s+&&\s+(.+)$',
+            command,
+            re.DOTALL,
+        )
+        if not match:
+            return
+
+        cd_path = match.group(1).strip()
+        rest_command = match.group(2).strip()
+
+        # Verificación de seguridad: la ruta no debe contener operadores
+        if any(op in cd_path for op in ("&&", "||", ";", "|", ">", "<")):
+            return
+
+        # Aplicar la transformación
+        arguments["working_dir"] = cd_path
+        arguments["command"] = rest_command
+
+        logger.debug(
+            "auto-transformado cd && chain a working_dir",
+            original_command=command[:100],
+            new_command=rest_command[:80],
+            working_dir=cd_path,
+        )
+
+    @staticmethod
+    def _resolve_case_insensitive_path(path_str: str) -> str | None:
+        """
+        Corrige rutas con casing incorrecto cuando existe una coincidencia única.
+        """
+        path = Path(path_str)
+        if path.exists():
+            return str(path)
+        if not path.is_absolute():
+            return None
+
+        current = Path(path.anchor or "/")
+        for part in path.parts[1:]:
+            if not current.exists() or not current.is_dir():
+                return None
+
+            try:
+                entries = {child.name.lower(): child.name for child in current.iterdir()}
+            except OSError:
+                return None
+
+            matched_name = entries.get(part.lower())
+            if matched_name is None:
+                return None
+            current = current / matched_name
+
+        return str(current)
+
+    @staticmethod
+    def _extract_heredoc_write(command: str) -> tuple[str, str, str] | None:
+        """
+        Detecta un heredoc mínimo del tipo `cat > file <<TAG ... TAG`.
+        """
+        match = re.match(
+            r"^cat\s+(>>?)\s+([^\s><|;&]+)\s+<<['\"]?([A-Za-z0-9_-]+)['\"]?\n([\s\S]*)\n\3\s*$",
+            command,
+        )
+        if not match:
+            return None
+
+        redirect_op, path_str, _, body = match.groups()
+        mode = "append" if redirect_op == ">>" else "write"
+        return mode, path_str, body
+
+    def _is_safe_heredoc_write(self, arguments: dict[str, Any]) -> bool:
+        """
+        Permite un heredoc estricto solo si escribe dentro del proyecto.
+        """
+        command = arguments.get("command", "").strip()
+        extracted = self._extract_heredoc_write(command)
+        if extracted is None:
+            return False
+
+        _, path_str, _ = extracted
+        target = Path(path_str)
+        working_dir = arguments.get("working_dir")
+        if not target.is_absolute():
+            base_dir = Path(working_dir) if working_dir else Path.cwd()
+            target = base_dir / target
+
+        violation = PathGuard(allowed_root=Path.cwd()).validate_write(str(target))
+        if violation is not None and violation.severity in (
+            ViolationSeverity.BLOCK,
+            ViolationSeverity.CONFIRM,
+        ):
+            logger.warning(
+                "heredoc bloqueado por PathGuard",
+                path=str(target),
+                reason=violation.reason,
+                task_id=self._task_id,
+            )
+            return False
+
+        return True
+
     def validate_arguments(self, arguments: dict[str, Any]) -> list[str]:
         """
         Validaciones adicionales específicas de ShellTool.
 
         Extiende la validación base con checks específicos:
-          - Comando no puede estar vacío
-          - Timeout debe ser positivo si se especifica
-          - working_dir debe existir si se especifica
+          - Comando no puede estar vacío.
+          - Timeout debe ser positivo si se especifica.
+          - Timeout fuera de rango se AUTO-CLAMPEA al máximo válido en vez de
+            rechazar. Esto evita que el LLM entre en un bucle infinito enviando
+            el mismo timeout inválido — un patrón observado frecuentemente con
+            modelos que ignoran los mensajes de error de validación.
+          - working_dir debe existir si se especifica.
         """
         # Primero las validaciones base (campos requeridos)
+        self._auto_transform_cd_chain(arguments)
         errors = super().validate_arguments(arguments)
 
         command = arguments.get("command", "").strip()
@@ -271,15 +468,38 @@ class ShellTool(BaseTool):
             elif timeout <= 0:
                 errors.append(f"timeout debe ser mayor que 0, recibido: {timeout}")
             elif timeout > TOOL_EXTENDED_TIMEOUT_SECONDS:
-                errors.append(
-                    f"timeout {timeout}s excede el máximo permitido "
-                    f"({TOOL_EXTENDED_TIMEOUT_SECONDS}s)"
+                # ══════════════════════════════════════════════════════════════
+                # AUTO-CLAMP: en vez de rechazar el comando completo, clampeamos
+                # el timeout al máximo válido y continuamos con la ejecución.
+                #
+                # RAZÓN: Muchos modelos LLM (especialmente los más pequeños)
+                # ignoran los mensajes de error de validación y repiten los
+                # mismos argumentos inválidos indefinidamente. El rechazo duro
+                # causaba bucles de 5+ iteraciones donde el agente enviaba
+                # timeout=100000 → error → timeout=100000 → error → ...
+                # hasta agotar el límite de iteraciones sin haber ejecutado
+                # ni un solo comando.
+                #
+                # El clampeo permite que el comando se ejecute con un timeout
+                # razonable, y el agente puede avanzar con su tarea.
+                # ══════════════════════════════════════════════════════════════
+                logger.warning(
+                    "timeout auto-clampeado al máximo permitido",
+                    original_timeout=timeout,
+                    clamped_timeout=TOOL_EXTENDED_TIMEOUT_SECONDS,
+                    task_id=self._task_id,
                 )
+                arguments["timeout"] = TOOL_EXTENDED_TIMEOUT_SECONDS
 
         working_dir = arguments.get("working_dir")
         if working_dir is not None:
-            from pathlib import Path
             dir_path = Path(working_dir)
+            if not dir_path.exists():
+                corrected = self._resolve_case_insensitive_path(working_dir)
+                if corrected is not None:
+                    arguments["working_dir"] = corrected
+                    dir_path = Path(corrected)
+
             if not dir_path.exists():
                 errors.append(f"working_dir '{working_dir}' no existe")
             elif not dir_path.is_dir():
@@ -317,6 +537,10 @@ class ShellTool(BaseTool):
         )
 
         call_id = self._get_active_tool_call_id()
+        heredoc_result = self._execute_safe_heredoc_write(arguments, call_id)
+        if heredoc_result is not None:
+            return heredoc_result
+
         try:
             result = subprocess.run(
                 command,
@@ -381,6 +605,52 @@ class ShellTool(BaseTool):
                 error_message=f"Error del sistema operativo: {exc}",
                 output=str(exc),
             )
+
+    def _execute_safe_heredoc_write(
+        self,
+        arguments: dict[str, Any],
+        call_id: str,
+    ) -> ToolResult | None:
+        """
+        Ejecuta localmente un heredoc seguro sin invocar el shell real.
+        """
+        command = arguments.get("command", "").strip()
+        extracted = self._extract_heredoc_write(command)
+        if extracted is None:
+            return None
+
+        mode, path_str, body = extracted
+        target = Path(path_str)
+        working_dir = arguments.get("working_dir")
+        if not target.is_absolute():
+            base_dir = Path(working_dir) if working_dir else Path.cwd()
+            target = base_dir / target
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = body + "\n"
+
+        try:
+            if mode == "append":
+                with target.open("a", encoding="utf-8") as handle:
+                    handle.write(payload)
+                action = "actualizado"
+            else:
+                target.write_text(payload, encoding="utf-8")
+                action = "creado"
+        except OSError as exc:
+            return ToolResult.failure(
+                tool_call_id=call_id,
+                error_message=f"No se pudo escribir '{target}': {exc}",
+            )
+
+        return ToolResult.success(
+            tool_call_id=call_id,
+            output=(
+                f"Archivo {action} via heredoc seguro: {target}\n"
+                f"{payload.count(chr(10))} líneas, {len(payload)} caracteres"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Helpers privados
